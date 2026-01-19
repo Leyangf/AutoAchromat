@@ -23,6 +23,3 @@ Thumbs.db
 .env
 .venv/
 venv/
-# Output (generated at runtime)
-output/
-test_output/
