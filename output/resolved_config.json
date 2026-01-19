@@ -1,9 +1,11 @@
 {
   "agf_paths": [
-    "glass_database/SCHOTT.AGF"
+    "glass_database/SCHOTT.AGF",
+    "glass_database/OHARA.agf",
+    "glass_database/CDGM.AGF"
   ],
-  "system_type": "cemented",
-  "N_keep": 3,
+  "system_type": "air_spaced",
+  "N_keep": 100,
   "f": 100.0,
   "D": 25.0,
   "P0": 0.0,
@@ -17,5 +19,5 @@
   "allow_repeat": false,
   "d_air": 5.0,
   "out_dir": "output",
-  "display": 3
+  "display": 30
 }

@@ -5,7 +5,7 @@
         "glass_database/CDGM.AGF"
     ],
     "system_type": "air_spaced",
-    "N_keep": 80,
+    "N_keep": 100,
     "f": 100.0,
     "D": 25.0,
     "P0": 0.0,
@@ -19,5 +19,5 @@
     "allow_repeat": false,
     "d_air": 5.0,
     "out_dir": "output",
-    "display": 50
+    "display": 30
 }
