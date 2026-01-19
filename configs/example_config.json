@@ -1,0 +1,23 @@
+{
+    "agf_paths": [
+        "glass_database/SCHOTT.AGF",
+        "glass_database/OHARA.agf",
+        "glass_database/CDGM.AGF"
+    ],
+    "system_type": "air_spaced",
+    "N_keep": 80,
+    "f": 100.0,
+    "D": 25.0,
+    "P0": 0.0,
+    "W0": 0.0,
+    "C0": 0.0,
+    "lam0": 0.58756,
+    "lam1": 0.48613,
+    "lam2": 0.65627,
+    "min_delta_nu": 10.0,
+    "max_PE": 1e10,
+    "allow_repeat": false,
+    "d_air": 5.0,
+    "out_dir": "output",
+    "display": 50
+}
