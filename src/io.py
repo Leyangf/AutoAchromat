@@ -58,6 +58,12 @@ COLUMNS = [
     ("R2", "R2", 10, True),
     ("Pi_len", "Pi#", 4, False),
     ("PE", "PE", 14, True),
+    # Real-ray aberration columns (populated post-ranking for selected candidates)
+    ("Transverse Aberration [mm]", "Trans[mm]", 12, True),
+    ("Longitudinal Aberration [mm]", "Long[mm]", 12, True),
+    ("Axial Color [mm]", "AxCol[mm]", 12, True),
+    ("Secondary Spectrum [mm]", "SecSpec[mm]", 12, True),
+    ("Coma [mm]", "Coma[mm]", 12, True),
 ]
 
 
@@ -451,6 +457,9 @@ def save_report_md(
     lines.append(f"- **allow_repeat**: {cfg.allow_repeat}")
     if cfg.system_type == "air_spaced":
         lines.append(f"- **d_air**: {cfg.d_air}")
+    lines.append(f"- **crown_lens_thickness_mm**: {cfg.crown_lens_thickness_mm}")
+    lines.append(f"- **flint_lens_thickness_mm**: {cfg.flint_lens_thickness_mm}")
+    lines.append(f"- **field_for_aberration_deg**: {cfg.field_for_aberration_deg}")
     lines.append("- **agf_paths**:")
     for agf_path in cfg.agf_paths:
         lines.append(f"  - {agf_path}")
@@ -546,6 +555,9 @@ def save_resolved_config(cfg: "Config", display: int, out_path: str) -> None:
         "max_PE": cfg.max_PE,
         "allow_repeat": cfg.allow_repeat,
         "d_air": cfg.d_air,
+        "crown_lens_thickness_mm": cfg.crown_lens_thickness_mm,
+        "flint_lens_thickness_mm": cfg.flint_lens_thickness_mm,
+        "field_for_aberration_deg": cfg.field_for_aberration_deg,
         "out_dir": cfg.out_dir,
         "display": display,
     }
@@ -589,3 +601,179 @@ def dump_config(cfg: Any, path: str) -> None:
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, default=default_encoder)
+
+
+# =============================================================================
+# Real-ray aberration results handling
+# =============================================================================
+
+# Real-ray aberration column keys (must match EXACTLY as specified)
+REALRAY_COLUMNS = [
+    "Transverse Aberration [mm]",
+    "Longitudinal Aberration [mm]",
+    "Axial Color [mm]",
+    "Secondary Spectrum [mm]",
+    "Coma [mm]",
+]
+
+
+def update_row_with_realray(
+    row: dict[str, Any], realray_results: dict[str, Any]
+) -> dict[str, Any]:
+    """
+    Update a row dictionary with real-ray aberration results.
+
+    Args:
+        row: Original row dictionary from extract_candidate_row.
+        realray_results: Results from compute_realray_for_candidate.
+
+    Returns:
+        Updated row dictionary with real-ray columns.
+    """
+    updated = dict(row)
+    for key in REALRAY_COLUMNS:
+        if key in realray_results:
+            updated[key] = realray_results[key]
+    return updated
+
+
+def update_csv_row(
+    csv_path: str,
+    row_index: int,
+    realray_results: dict[str, Any],
+) -> None:
+    """
+    Update a specific row in the CSV file with real-ray results.
+
+    Args:
+        csv_path: Path to the results CSV file.
+        row_index: 0-based row index to update.
+        realray_results: Results from compute_realray_for_candidate.
+    """
+    # Read existing CSV
+    path = Path(csv_path)
+    if not path.exists():
+        print(f"Warning: CSV file not found: {csv_path}")
+        return
+
+    rows: list[dict[str, Any]] = []
+    fieldnames: list[str] = []
+
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames) if reader.fieldnames else []
+        rows = list(reader)
+
+    # Update the specific row
+    if 0 <= row_index < len(rows):
+        for key in REALRAY_COLUMNS:
+            if key in realray_results:
+                val = realray_results[key]
+                rows[row_index][key] = fmt_float(val, 6) if val is not None else ""
+
+    # Ensure all realray columns are in fieldnames
+    for key in REALRAY_COLUMNS:
+        if key not in fieldnames:
+            fieldnames.append(key)
+
+    # Write back
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"Updated CSV row {row_index + 1} with real-ray results: {csv_path}")
+
+
+def append_realray_to_report(
+    report_path: str,
+    candidate_rank: int,
+    row: dict[str, Any],
+    realray_results: dict[str, Any],
+) -> None:
+    """
+    Append real-ray results section to the Markdown report.
+
+    Args:
+        report_path: Path to the report.md file.
+        candidate_rank: 1-based rank of the candidate.
+        row: Row dictionary with candidate data.
+        realray_results: Results from compute_realray_for_candidate.
+    """
+    path = Path(report_path)
+
+    lines: list[str] = []
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"## Selected Candidate Real-Ray Results (Rank {candidate_rank})")
+    lines.append("")
+
+    # Candidate identification
+    glass1 = row.get("glass1_name", "?")
+    glass2 = row.get("glass2_name", "?")
+    system_type = row.get("system_type", "?")
+    lines.append(f"**Glass pair**: {glass1} + {glass2}")
+    lines.append(f"**System type**: {system_type}")
+    lines.append("")
+
+    # Check for errors
+    if realray_results.get("_realray_error"):
+        lines.append(f"**Error**: {realray_results['_realray_error']}")
+        lines.append("")
+    else:
+        # Aberration results table
+        lines.append("| Aberration | Value [mm] |")
+        lines.append("|------------|------------|")
+
+        for key in REALRAY_COLUMNS:
+            val = realray_results.get(key)
+            val_str = fmt_float(val, 6) if val is not None else "N/A"
+            # Use shorter display name
+            display_name = key.replace(" [mm]", "")
+            lines.append(f"| {display_name} | {val_str} |")
+
+        lines.append("")
+
+    # Append to existing report
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    print(f"Appended real-ray results to: {report_path}")
+
+
+def print_realray_results(
+    candidate_rank: int,
+    row: dict[str, Any],
+    realray_results: dict[str, Any],
+) -> None:
+    """
+    Print real-ray results to console.
+
+    Args:
+        candidate_rank: 1-based rank of the candidate.
+        row: Row dictionary with candidate data.
+        realray_results: Results from compute_realray_for_candidate.
+    """
+    print()
+    print("=" * 60)
+    print(f"Real-Ray Aberrations for Candidate #{candidate_rank}")
+    print("=" * 60)
+
+    glass1 = row.get("glass1_name", "?")
+    glass2 = row.get("glass2_name", "?")
+    system_type = row.get("system_type", "?")
+    print(f"  Glass pair:    {glass1} + {glass2}")
+    print(f"  System type:   {system_type}")
+    print()
+
+    if realray_results.get("_realray_error"):
+        print(f"  ERROR: {realray_results['_realray_error']}")
+    else:
+        for key in REALRAY_COLUMNS:
+            val = realray_results.get(key)
+            val_str = fmt_float(val, 6) if val is not None else "N/A"
+            # Right-align values
+            print(f"  {key}: {val_str:>12}")
+
+    print("=" * 60)

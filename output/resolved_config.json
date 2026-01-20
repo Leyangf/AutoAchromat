@@ -1,11 +1,9 @@
 {
   "agf_paths": [
-    "glass_database/SCHOTT.AGF",
-    "glass_database/OHARA.agf",
-    "glass_database/CDGM.AGF"
+    "glass_database/SCHOTT.AGF"
   ],
-  "system_type": "air_spaced",
-  "N_keep": 100,
+  "system_type": "cemented",
+  "N_keep": 30,
   "f": 100.0,
   "D": 25.0,
   "P0": 0.0,
@@ -18,6 +16,9 @@
   "max_PE": 10000000000.0,
   "allow_repeat": false,
   "d_air": 5.0,
+  "crown_lens_thickness_mm": 5.0,
+  "flint_lens_thickness_mm": 3.0,
+  "field_for_aberration_deg": 1.0,
   "out_dir": "output",
   "display": 30
 }
