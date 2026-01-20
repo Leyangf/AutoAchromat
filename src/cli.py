@@ -154,6 +154,35 @@ Examples:
         help="Air gap thickness in mm for air-spaced (default: 5.0)",
     )
 
+    # Real-ray aberration parameters (default None)
+    parser.add_argument(
+        "--crown_lens_thickness_mm",
+        type=float,
+        default=None,
+        help="Crown lens (higher Abbe) thickness in mm (default: 5.0)",
+    )
+    parser.add_argument(
+        "--flint_lens_thickness_mm",
+        type=float,
+        default=None,
+        help="Flint lens (lower Abbe) thickness in mm (default: 3.0)",
+    )
+    parser.add_argument(
+        "--field_for_aberration_deg",
+        type=float,
+        default=None,
+        help="Field angle in degrees for coma calculation (default: 1.0)",
+    )
+
+    # Real-ray calculation for specific candidate (post-ranking)
+    parser.add_argument(
+        "--realray-index",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Compute real-ray aberrations for candidate at rank N (1-based)",
+    )
+
     # Output (default None)
     parser.add_argument(
         "--out_dir",
@@ -241,6 +270,21 @@ def _apply_config_to_cfg(cfg: "Config", config: dict[str, Any]) -> int | None:
         cfg.allow_repeat = bool(config["allow_repeat"])
     if "d_air" in config and config["d_air"] is not None:
         cfg.d_air = float(config["d_air"])
+    if (
+        "crown_lens_thickness_mm" in config
+        and config["crown_lens_thickness_mm"] is not None
+    ):
+        cfg.crown_lens_thickness_mm = float(config["crown_lens_thickness_mm"])
+    if (
+        "flint_lens_thickness_mm" in config
+        and config["flint_lens_thickness_mm"] is not None
+    ):
+        cfg.flint_lens_thickness_mm = float(config["flint_lens_thickness_mm"])
+    if (
+        "field_for_aberration_deg" in config
+        and config["field_for_aberration_deg"] is not None
+    ):
+        cfg.field_for_aberration_deg = float(config["field_for_aberration_deg"])
     if "out_dir" in config and config["out_dir"]:
         cfg.out_dir = config["out_dir"]
 
@@ -291,6 +335,12 @@ def _apply_cli_overrides(cfg: "Config", args: argparse.Namespace) -> None:
         cfg.allow_repeat = args.allow_repeat
     if args.d_air is not None:
         cfg.d_air = args.d_air
+    if args.crown_lens_thickness_mm is not None:
+        cfg.crown_lens_thickness_mm = args.crown_lens_thickness_mm
+    if args.flint_lens_thickness_mm is not None:
+        cfg.flint_lens_thickness_mm = args.flint_lens_thickness_mm
+    if args.field_for_aberration_deg is not None:
+        cfg.field_for_aberration_deg = args.field_for_aberration_deg
     if args.out_dir is not None:
         cfg.out_dir = args.out_dir
 
@@ -422,6 +472,9 @@ def print_config_summary(
     print(f"  allow_repeat:   {cfg.allow_repeat}")
     if cfg.system_type == "air_spaced":
         print(f"  d_air:          {cfg.d_air} mm")
+    print(f"  Crown thickness: {cfg.crown_lens_thickness_mm} mm")
+    print(f"  Flint thickness: {cfg.flint_lens_thickness_mm} mm")
+    print(f"  Field angle:    {cfg.field_for_aberration_deg} deg")
     print(f"  Output dir:     {cfg.out_dir}")
     print(f"  Display rows:   {display_count}")
     print("=" * 60)

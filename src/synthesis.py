@@ -69,6 +69,11 @@ class Config:
     # Air-spaced doublet parameters
     d_air: float = 5.0  # Air gap thickness (mm) for air-spaced doublets
 
+    # Real-ray aberration parameters (post-ranking)
+    crown_lens_thickness_mm: float = 5.0  # Thickness of crown lens (higher Abbe number)
+    flint_lens_thickness_mm: float = 3.0  # Thickness of flint lens (lower Abbe number)
+    field_for_aberration_deg: float = 1.0  # Field angle for coma calculation (degrees)
+
     # Output directory
     out_dir: str = "output"
 
@@ -96,6 +101,9 @@ def default_cfg() -> Config:
         N_keep=30,
         allow_repeat=False,
         d_air=5.0,
+        crown_lens_thickness_mm=5.0,
+        flint_lens_thickness_mm=3.0,
+        field_for_aberration_deg=1.0,
         out_dir="output",
     )
 
