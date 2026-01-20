@@ -101,19 +101,19 @@ Examples:
         "--lam0",
         type=float,
         default=None,
-        help="Primary wavelength in um (default: 0.58756, d-line)",
+        help="Primary wavelength in um (default: 0.58756)",
     )
     parser.add_argument(
         "--lam1",
         type=float,
         default=None,
-        help="Blue wavelength in um (default: 0.48613, F-line)",
+        help="Short wavelength in um (default: 0.48613)",
     )
     parser.add_argument(
         "--lam2",
         type=float,
         default=None,
-        help="Red wavelength in um (default: 0.65627, C-line)",
+        help="Long wavelength in um (default: 0.65627)",
     )
 
     # Filtering parameters (default None)

@@ -124,7 +124,7 @@ python run.py --config configs/my_design.json
 | `--f` | float | Focal length (mm) | 100.0 |
 | `--D` | float | Aperture diameter (mm) | 25.0 |
 | `--P0, --W0, --C0` | float | Target aberrations | 0.0 |
-| `--lam0, --lam1, --lam2` | float | Wavelengths (μm) | d, F, C lines |
+| `--lam0, --lam1, --lam2` | float | Wavelengths (μm) | 0.58756, 0.48613, 0.65627 |
 | `--min_delta_nu` | float | Min Abbe number difference | 10.0 |
 | `--max_PE` | float | Max PE threshold | 1e10 |
 | `--allow_repeat` / `--no_allow_repeat` | bool | Same glass both elements? | False |

@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from pathlib import Path
+
+# from pathlib import Path
 from typing import Iterator
 
 from src.glass_reader import Glass, load_catalog
@@ -25,12 +26,12 @@ from src import io
 
 
 # =============================================================================
-# Constants - Standard Spectral Lines (micrometers)
+# Constants - Default Wavelengths (micrometers)
 # =============================================================================
 
-LAMBDA_F = 0.48613  # F-line (blue, hydrogen)
-LAMBDA_D = 0.58756  # d-line (yellow, helium)
-LAMBDA_C = 0.65627  # C-line (red, hydrogen)
+LAMBDA_0 = 0.58756  # Primary wavelength (default: yellow)
+LAMBDA_1 = 0.48613  # Short wavelength (default: blue)
+LAMBDA_2 = 0.65627  # Long wavelength (default: red)
 
 
 # =============================================================================
@@ -50,29 +51,29 @@ class Config:
 
     # Optical parameters
     f: float = 100.0  # Focal length (mm)
-    D: float = 25.0  # Aperture diameter (mm)
+    D: float = 20.0  # Aperture diameter (mm)
     P0: float = 0.0  # Target spherical aberration (Seidel S_I)
     W0: float = 0.0  # Target coma (Seidel S_II)
     C0: float = 0.0  # Target chromatic aberration
 
     # Wavelengths (micrometers)
-    lam0: float = LAMBDA_D  # Primary wavelength (d-line)
-    lam1: float = LAMBDA_F  # Blue wavelength (F-line)
-    lam2: float = LAMBDA_C  # Red wavelength (C-line)
+    lam0: float = LAMBDA_0  # Primary wavelength
+    lam1: float = LAMBDA_1  # Short wavelength
+    lam2: float = LAMBDA_2  # Long wavelength
 
     # Filtering and selection parameters
     min_delta_nu: float = 10.0  # Minimum Abbe number difference
-    max_PE: float = 1e10  # Maximum PE threshold
+    max_PE: float = 0.01  # Maximum PE threshold
     N_keep: int = 30  # Number of top candidates to keep
     allow_repeat: bool = False  # Allow same glass for both elements
 
     # Air-spaced doublet parameters
-    d_air: float = 5.0  # Air gap thickness (mm) for air-spaced doublets
+    d_air: float = 2.0  # Air gap thickness (mm) for air-spaced doublets
 
     # Real-ray aberration parameters (post-ranking)
     crown_lens_thickness_mm: float = 5.0  # Thickness of crown lens (higher Abbe number)
     flint_lens_thickness_mm: float = 3.0  # Thickness of flint lens (lower Abbe number)
-    field_for_aberration_deg: float = 1.0  # Field angle for coma calculation (degrees)
+    field_for_aberration_deg: float = 0.0  # Field angle for coma calculation (degrees)
 
     # Output directory
     out_dir: str = "output"
@@ -89,21 +90,21 @@ def default_cfg() -> Config:
         agf_paths=["glass_database/SCHOTT.AGF"],
         system_type="cemented",
         f=100.0,
-        D=25.0,
+        D=20.0,
         P0=0.0,
         W0=0.0,
         C0=0.0,
-        lam0=LAMBDA_D,
-        lam1=LAMBDA_F,
-        lam2=LAMBDA_C,
+        lam0=LAMBDA_0,
+        lam1=LAMBDA_1,
+        lam2=LAMBDA_2,
         min_delta_nu=10.0,
-        max_PE=1e10,
+        max_PE=0.01,
         N_keep=30,
         allow_repeat=False,
-        d_air=5.0,
+        d_air=2.0,
         crown_lens_thickness_mm=5.0,
         flint_lens_thickness_mm=3.0,
-        field_for_aberration_deg=1.0,
+        field_for_aberration_deg=0.0,
         out_dir="output",
     )
 
@@ -347,7 +348,7 @@ def compute_abbe_number(glass: Glass) -> float:
     """
     Compute Abbe number νd = (nd - 1) / (nF - nC).
 
-    Uses standard Fraunhofer lines: F=486.13nm, d=587.56nm, C=656.27nm.
+    Uses wavelengths: lambda_0 (primary), lambda_1 (short), lambda_2 (long).
 
     Args:
         glass: Glass object.
@@ -355,20 +356,20 @@ def compute_abbe_number(glass: Glass) -> float:
     Returns:
         Abbe number (dispersion).
     """
-    nd = refractive_index(glass, LAMBDA_D)
-    nF = refractive_index(glass, LAMBDA_F)
-    nC = refractive_index(glass, LAMBDA_C)
+    n0 = refractive_index(glass, LAMBDA_0)
+    n1 = refractive_index(glass, LAMBDA_1)
+    n2 = refractive_index(glass, LAMBDA_2)
 
-    denom = nF - nC
+    denom = n1 - n2
     if abs(denom) < 1e-10:
         return float("inf")
 
-    return (nd - 1.0) / denom
+    return (n0 - 1.0) / denom
 
 
 def compute_dispersion(glass: Glass) -> float:
     """
-    Compute mean dispersion V = nF - nC.
+    Compute mean dispersion V = n1 - n2.
 
     Args:
         glass: Glass object.
@@ -376,9 +377,9 @@ def compute_dispersion(glass: Glass) -> float:
     Returns:
         Mean dispersion.
     """
-    nF = refractive_index(glass, LAMBDA_F)
-    nC = refractive_index(glass, LAMBDA_C)
-    return nF - nC
+    n1 = refractive_index(glass, LAMBDA_1)
+    n2 = refractive_index(glass, LAMBDA_2)
+    return n1 - n2
 
 
 # =============================================================================
@@ -424,7 +425,7 @@ def filter_glasses(glasses: list[Glass], cfg: Config) -> list[Glass]:
 
         # Verify we can compute refractive index
         try:
-            _ = refractive_index(glass, LAMBDA_D)
+            _ = refractive_index(glass, LAMBDA_0)
         except (ValueError, ZeroDivisionError):
             continue
 
@@ -575,9 +576,9 @@ def solve_C(g1: Glass, g2: Glass, cfg: Config) -> list[Candidate]:
         List containing one Candidate if solution exists, empty list otherwise.
     """
     try:
-        # Get refractive indices at d-line
-        n1 = refractive_index(g1, LAMBDA_D)
-        n2 = refractive_index(g2, LAMBDA_D)
+        # Get refractive indices at primary wavelength
+        n1 = refractive_index(g1, LAMBDA_0)
+        n2 = refractive_index(g2, LAMBDA_0)
 
         # Compute Abbe numbers
         nu1 = compute_abbe_number(g1)
@@ -602,7 +603,7 @@ def solve_C(g1: Glass, g2: Glass, cfg: Config) -> list[Candidate]:
         # φ1/ν1 + φ2/ν2 = C0  (C0=0 for perfect achromatization)
         # φ1 + φ2 = φ_total
 
-        # For C0 = 0 (zero chromatic aberration at d-line):
+        # For C0 = 0 (zero chromatic aberration at primary wavelength):
         phi1 = phi_total * nu1 / delta_nu
         phi2 = -phi_total * nu2 / delta_nu
 
