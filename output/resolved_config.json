@@ -2,7 +2,7 @@
   "agf_paths": [
     "glass_database/SCHOTT.AGF"
   ],
-  "system_type": "cemented",
+  "system_type": "air_spaced",
   "N_keep": 30,
   "f": 100.0,
   "D": 25.0,

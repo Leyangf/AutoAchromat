@@ -2,6 +2,7 @@ import sys
 from argparse import Namespace
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
@@ -134,9 +135,13 @@ class MainWindow(QWidget):
         self.btn_realray.setToolTip(
             "Compute real-ray aberrations for all candidates in the table"
         )
+        self.btn_draw_2d = QPushButton("Show 2D Drawing")
+        self.btn_draw_2d.setEnabled(False)  # Disabled until results are available
+        self.btn_draw_2d.setToolTip("Draw 2D layout of the selected optical system")
         action_layout.addWidget(self.btn_load_config)
         action_layout.addWidget(self.btn_run)
         action_layout.addWidget(self.btn_realray)
+        action_layout.addWidget(self.btn_draw_2d)
         action_layout.addStretch()
 
         input_layout.addLayout(left_form)
@@ -168,6 +173,7 @@ class MainWindow(QWidget):
         self.btn_load_config.clicked.connect(self._on_load_config)
         self.btn_run.clicked.connect(self._on_run)
         self.btn_realray.clicked.connect(self._on_compute_all_realray)
+        self.btn_draw_2d.clicked.connect(self._on_draw_2d)
         self.system_type.currentTextChanged.connect(self._on_system_changed)
 
     def _make_double_box(
@@ -387,6 +393,7 @@ class MainWindow(QWidget):
         self.rows = rows
         self.cfg = cfg
         self.btn_realray.setEnabled(len(rows) > 0)
+        self.btn_draw_2d.setEnabled(len(rows) > 0)
 
         best_pe = stats.get("best_PE")
         status_msg = f"Done. Candidates: {len(rows)}"
@@ -463,6 +470,7 @@ class MainWindow(QWidget):
         total_rows = len(self.rows)
         errors = []
         self.btn_realray.setEnabled(False)
+        self.btn_draw_2d.setEnabled(False)
         self.btn_run.setEnabled(False)
 
         try:
@@ -534,6 +542,7 @@ class MainWindow(QWidget):
 
         finally:
             self.btn_realray.setEnabled(True)
+            self.btn_draw_2d.setEnabled(True)
             self.btn_run.setEnabled(True)
 
     def _update_table_row(self, row_index: int, realray_results: dict) -> None:
@@ -557,6 +566,72 @@ class MainWindow(QWidget):
                 self.table.setItem(row_index, c, item)
 
         self.table.resizeColumnsToContents()
+
+    def _on_draw_2d(self) -> None:
+        """Draw 2D layout of the selected optical system."""
+        # Check prerequisites
+        if not hasattr(self, "rows") or not self.rows:
+            QMessageBox.warning(self, "No Results", "No results available to draw.")
+            return
+
+        if self.cfg is None:
+            QMessageBox.warning(self, "No Config", "No configuration available.")
+            return
+
+        # Get selected row
+        selected_items = self.table.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(
+                self, "No Selection", "Please select a row from the table first."
+            )
+            return
+
+        selected_row_index = selected_items[0].row()
+
+        if selected_row_index < 0 or selected_row_index >= len(self.rows):
+            QMessageBox.warning(self, "Invalid Selection", "Invalid row selected.")
+            return
+
+        # Get the candidate row data
+        candidate_row = self.rows[selected_row_index]
+
+        # Import and call the draw function
+        try:
+            from src.raytrace.optiland_interface import draw_optical_system
+
+            # Update config with current GUI values for thickness
+            self.cfg.crown_lens_thickness_mm = self.crown_thickness.value()
+            self.cfg.flint_lens_thickness_mm = self.flint_thickness.value()
+            self.cfg.field_for_aberration_deg = self.field_deg.value()
+
+            self.status.setText("Drawing 2D layout...")
+            QApplication.processEvents()
+
+            fig, error = draw_optical_system(candidate_row, self.cfg, num_rays=5)
+
+            if error:
+                QMessageBox.critical(self, "Draw Error", error)
+                self.status.setText("Drawing failed")
+                return
+
+            # Show the figure
+            plt.show()
+            self.status.setText("2D layout displayed")
+
+        except ImportError as exc:
+            QMessageBox.critical(
+                self,
+                "Import Error",
+                f"Failed to import draw function:\n\n{exc}\n\n"
+                "Make sure Optiland is installed: pip install optiland",
+            )
+            self.status.setText("Drawing failed - Optiland not available")
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Error", f"Failed to draw optical system:\n\n{exc}"
+            )
+            self.status.setText("Drawing failed")
 
 
 if __name__ == "__main__":

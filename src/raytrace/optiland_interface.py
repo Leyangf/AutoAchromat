@@ -207,9 +207,9 @@ def _build_cemented_doublet(
     )
 
     # Handle very large radii
-    R1 = _safe_radius(R1_front)
-    R2 = _safe_radius(R_cemented)
-    R3 = _safe_radius(R2_back)
+    R1 = _safe_radius(-R1_front)
+    R2 = _safe_radius(-R_cemented)
+    R3 = _safe_radius(-R2_back)
 
     # Create optical system
     if Optic is None or IdealMaterial is None or be is None:
@@ -329,10 +329,10 @@ def _build_air_spaced_doublet(
     d_air = cfg.d_air
 
     # Handle very large radii
-    R1 = _safe_radius(R1_front)
-    R2 = _safe_radius(R1_back)
-    R3 = _safe_radius(R2_front)
-    R4 = _safe_radius(R2_back)
+    R1 = _safe_radius(-R1_front)
+    R2 = _safe_radius(-R1_back)
+    R3 = _safe_radius(-R2_front)
+    R4 = _safe_radius(-R2_back)
 
     # Create optical system
     if Optic is None or IdealMaterial is None or be is None:
@@ -649,3 +649,56 @@ def compute_realray_for_candidate(
         "_realray_success": results.success,
         "_realray_error": results.error_message,
     }
+
+
+def draw_optical_system(
+    candidate_row: dict[str, Any],
+    cfg: "Config",
+    num_rays: int = 5,
+    figsize: tuple[float, float] = (10, 4),
+) -> tuple[Any, str | None]:
+    """
+    Draw a 2D layout of the optical system for a candidate.
+
+    Uses Optiland's built-in draw() method to visualize the lens system
+    with ray traces.
+
+    Args:
+        candidate_row: Row dictionary from results table
+        cfg: Configuration object
+        num_rays: Number of rays to trace (default: 5)
+        figsize: Figure size as (width, height) in inches
+
+    Returns:
+        Tuple of (figure, error_message). If successful, error_message is None.
+        If failed, figure is None and error_message contains the error.
+    """
+    # Check Optiland availability
+    error = _check_optiland()
+    if error:
+        return None, error
+
+    try:
+        # Build the optical system at the primary wavelength
+        lam0 = cfg.lam0
+        lens = _build_system_for_wavelength(candidate_row, cfg, lam0)
+
+        # Draw the system using Optiland's built-in method
+        fig, ax = lens.draw(
+            fields="all",
+            wavelengths="primary",
+            num_rays=num_rays,
+            figsize=figsize,
+        )
+
+        # Add title with glass information
+        glass1 = candidate_row.get("glass1_name", "?")
+        glass2 = candidate_row.get("glass2_name", "?")
+        system_type = candidate_row.get("system_type", "cemented")
+        title = f"{system_type.replace('_', ' ').title()} Doublet: {glass1} + {glass2}"
+        ax.set_title(title)
+
+        return fig, None
+
+    except Exception as exc:
+        return None, f"Failed to draw optical system: {exc}"
