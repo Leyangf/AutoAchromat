@@ -101,7 +101,6 @@ Create `configs/my_design.json`:
   "lam2": 0.65627,
   "min_delta_nu": 10.0,
   "max_PE": 1e10,
-  "allow_repeat": false,
   "d_air": 5.0,
   "out_dir": "output",
   "display": 10

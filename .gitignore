@@ -23,3 +23,13 @@ Thumbs.db
 .env
 .venv/
 venv/
+
+# runtime outputs
+output/
+test_output/
+*.csv
+*.md
+
+# but keep docs / configs you really want
+!README.md
+!configs/*.json

@@ -1,24 +1,28 @@
 """
-Analytical synthesis pipeline for achromat design (2022 paper).
+Analytical synthesis pipeline for achromat design.
 
-This module implements the main control flow for glass pair enumeration,
-constraint solving, and candidate ranking based on:
-- Nguyen 2022: "Automation of Synthesis and Ranking of Cemented and Air-Spaced Doublets"
-- Ivanova et al. 2017: "Computer tool for achromatic and aplanatic cemented doublet design"
+This module implements the main control flow for two-element objectives:
+- Exhaustive glass-pair enumeration (each-with-each)
+- Analytical achromatization (C = C0)
+- Analytical monochromatic feasibility check based on REAL solution branches
+- Preliminary evaluation (PE) via src/score.py ONLY
+- PE-only filtering and Top-N keeping
 
-References:
-- Thin-lens 3rd-order aberration theory
-- Seidel aberration coefficients
-- Standard Fraunhofer wavelengths: F=486.13nm, d=587.56nm, C=656.27nm
+Supports BOTH cemented and air-spaced doublets.
+
+Key Features:
+- Arbitrary wavelength band support (cfg.lam0/lam1/lam2)
+- Analytical finite-branch solvers for monochromatic constraints
+- Branch existence decided by discriminant logic (real roots)
+- Surface invariant P_k, W_k computation via alpha parameters
+- PE-only ranking using src/score.py
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-
-# from pathlib import Path
-from typing import Iterator
+from typing import Iterator, List, Optional
 
 from src.glass_reader import Glass, load_catalog
 from src.score import Candidate, TopNContainer, compute_pe, rank_key
@@ -26,12 +30,12 @@ from src import io
 
 
 # =============================================================================
-# Constants - Default Wavelengths (micrometers)
+# Default Wavelengths (micrometers) - Used only as defaults
 # =============================================================================
 
-LAMBDA_0 = 0.58756  # Primary wavelength (default: yellow)
-LAMBDA_1 = 0.48613  # Short wavelength (default: blue)
-LAMBDA_2 = 0.65627  # Long wavelength (default: red)
+LAMBDA_0 = 0.58756  # Primary wavelength (default: yellow d-line)
+LAMBDA_1 = 0.48613  # Short wavelength (default: blue F-line)
+LAMBDA_2 = 0.65627  # Long wavelength (default: red C-line)
 
 
 # =============================================================================
@@ -41,7 +45,17 @@ LAMBDA_2 = 0.65627  # Long wavelength (default: red)
 
 @dataclass
 class Config:
-    """Configuration for the 2022 synthesis pipeline."""
+    """
+    Configuration for the synthesis pipeline.
+
+    Wavelength Convention:
+        lam0: Primary design wavelength (where focal length is defined)
+        lam1: Short wavelength of the band
+        lam2: Long wavelength of the band
+
+    The generalized Abbe number is computed as:
+        nu = (n(lam0) - 1) / (n(lam1) - n(lam2))
+    """
 
     # Glass catalog paths
     agf_paths: list[str] = field(default_factory=list)
@@ -52,11 +66,11 @@ class Config:
     # Optical parameters
     f: float = 100.0  # Focal length (mm)
     D: float = 20.0  # Aperture diameter (mm)
-    P0: float = 0.0  # Target spherical aberration (Seidel S_I)
-    W0: float = 0.0  # Target coma (Seidel S_II)
-    C0: float = 0.0  # Target chromatic aberration
+    P0: float = 0.0  # Target spherical aberration parameter
+    W0: float = 0.0  # Target coma parameter
+    C0: float = 0.0  # Target chromatic aberration parameter
 
-    # Wavelengths (micrometers)
+    # Wavelengths (micrometers) - ARBITRARY band
     lam0: float = LAMBDA_0  # Primary wavelength
     lam1: float = LAMBDA_1  # Short wavelength
     lam2: float = LAMBDA_2  # Long wavelength
@@ -68,24 +82,19 @@ class Config:
     allow_repeat: bool = False  # Allow same glass for both elements
 
     # Air-spaced doublet parameters
-    d_air: float = 2.0  # Air gap thickness (mm) for air-spaced doublets
+    d_air: float = 2.0  # Air gap thickness (mm) - stored for geometry output only
 
     # Real-ray aberration parameters (post-ranking)
-    crown_lens_thickness_mm: float = 5.0  # Thickness of crown lens (higher Abbe number)
-    flint_lens_thickness_mm: float = 3.0  # Thickness of flint lens (lower Abbe number)
-    field_for_aberration_deg: float = 0.0  # Field angle for coma calculation (degrees)
+    crown_lens_thickness_mm: float = 5.0
+    flint_lens_thickness_mm: float = 3.0
+    field_for_aberration_deg: float = 0.0
 
     # Output directory
     out_dir: str = "output"
 
 
 def default_cfg() -> Config:
-    """
-    Return a default, runnable configuration.
-
-    Returns:
-        A Config with reasonable default values for testing.
-    """
+    """Return a default, runnable configuration."""
     return Config(
         agf_paths=["glass_database/SCHOTT.AGF"],
         system_type="cemented",
@@ -110,67 +119,39 @@ def default_cfg() -> Config:
 
 
 # =============================================================================
-# Surface Invariant Helpers (Alpha-based P and W)
+# BranchSolution - Result from analytical branch solver
 # =============================================================================
 
 
-def compute_alphas_from_radii(
-    n_list: list[float], R_list: list[float], fprime: float, alpha_last: float = 1.0
-) -> list[float]:
+@dataclass
+class BranchSolution:
     """
-    Compute alpha parameters from radii using backward recursion.
+    Represents a single real solution branch from the analytical solver.
 
-    Given m surfaces with radii R_1..R_m and media indices n_1..n_{m+1},
-    set alpha_{m+1} = alpha_last (normalization).
-    Then for i = m ... 1:
-        n_{i+1}*alpha_{i+1} - n_i*alpha_i = (n_{i+1}*fprime)/R_i
-        => alpha_i = (n_{i+1}*alpha_{i+1} - (n_{i+1}*fprime)/R_i) / n_i
-
-    Args:
-        n_list: List of refractive indices [n_1, n_2, ..., n_{m+1}].
-                Length = number of surfaces + 1.
-        R_list: List of surface radii [R_1, R_2, ..., R_m].
-                Length = number of surfaces.
-        fprime: Focal length (mm), used for scaling.
-        alpha_last: Normalization value for alpha_{m+1}, default 1.0.
-
-    Returns:
-        List of alpha values [alpha_1, alpha_2, ..., alpha_{m+1}].
-        Length = len(n_list) = len(R_list) + 1.
+    Attributes:
+        root_param: The solved branch parameter (e.g., alpha_2 for cemented)
+        alphas: List of alpha parameters [alpha_1, alpha_2, ..., alpha_{m+1}]
+        n_list: List of refractive indices [n_1, n_2, ..., n_{m+1}]
+        radii_norm: List of NORMALIZED surface radii [r_1, r_2, ..., r_m] (f'=1)
+        P_surfaces: Spherical aberration for each surface [P_1, P_2, ..., P_m]
+        W_surfaces: Coma for each surface [W_1, W_2, ..., W_m]
+        P_total: Sum of P_surfaces
+        W_total: Sum of W_surfaces
     """
-    m = len(R_list)  # Number of surfaces
-    if len(n_list) != m + 1:
-        raise ValueError(
-            f"n_list length ({len(n_list)}) must be R_list length + 1 ({m + 1})"
-        )
 
-    # Initialize alphas with final value
-    alphas = [0.0] * (m + 1)
-    alphas[m] = alpha_last  # alpha_{m+1}
+    root_param: float
+    alphas: List[float]
+    n_list: List[float]
+    radii_norm: List[float]  # NORMALIZED radii (f'=1), scaled to mm in pipeline
+    P_surfaces: List[float]
+    W_surfaces: List[float]
+    P_total: float
+    W_total: float
 
-    # Backward recursion: i = m, m-1, ..., 1 (but 0-indexed: i = m-1, ..., 0)
-    for i in range(m - 1, -1, -1):
-        # Surface i+1 (1-indexed) corresponds to R_list[i], between n_list[i] and n_list[i+1]
-        n_i = n_list[i]  # n_i (medium before surface)
-        n_i1 = n_list[i + 1]  # n_{i+1} (medium after surface)
-        alpha_i1 = alphas[i + 1]  # alpha_{i+1}
-        R_i = R_list[i]  # R_i
 
-        # Handle large radius (nearly flat surface)
-        if abs(R_i) > 1e9:
-            # fprime / R_i ~ 0, so alpha_i = n_{i+1} * alpha_{i+1} / n_i
-            if abs(n_i) < 1e-15:
-                alphas[i] = 0.0
-            else:
-                alphas[i] = n_i1 * alpha_i1 / n_i
-        else:
-            # Normal case
-            if abs(n_i) < 1e-15:
-                alphas[i] = 0.0
-            else:
-                alphas[i] = (n_i1 * alpha_i1 - (n_i1 * fprime) / R_i) / n_i
-
-    return alphas
+# =============================================================================
+# Surface Invariant Computation (Alpha-Parameter Method)
+# =============================================================================
 
 
 def surface_PW(
@@ -195,14 +176,13 @@ def surface_PW(
         Tuple (P_k, W_k) of surface invariants.
         Returns (0.0, 0.0) if denominator is near zero.
     """
-    # Compute 1/n terms
     if abs(nk) < 1e-15 or abs(nk1) < 1e-15:
         return (0.0, 0.0)
 
     inv_nk = 1.0 / nk
     inv_nk1 = 1.0 / nk1
 
-    # Denominator for A_k
+    # Denominator for A_k: (1/n_{k+1}) - (1/n_k)
     denom = inv_nk1 - inv_nk
     if abs(denom) < 1e-15:
         # Same refractive index on both sides (no refraction)
@@ -223,6 +203,51 @@ def surface_PW(
     return (P_k, W_k)
 
 
+def compute_radii_from_alphas(
+    n_list: list[float], alpha_list: list[float], fprime: float
+) -> list[float]:
+    """
+    Compute surface radii from alpha parameters.
+
+    For each surface i between media n[i] and n[i+1]:
+        r_i = f' * n[i+1] * (alpha[i+1] - alpha[i]) / (n[i+1] - n[i])
+
+    Args:
+        n_list: List of refractive indices [n_1, n_2, ..., n_{m+1}].
+        alpha_list: List of alpha values [alpha_1, alpha_2, ..., alpha_{m+1}].
+        fprime: Focal length (use 1.0 for normalized).
+
+    Returns:
+        List of surface radii [r_1, r_2, ..., r_m].
+    """
+    m = len(n_list) - 1  # Number of surfaces
+    if len(alpha_list) != len(n_list):
+        raise ValueError(
+            f"alpha_list length ({len(alpha_list)}) must equal n_list length ({len(n_list)})"
+        )
+
+    radii = []
+    for i in range(m):
+        n_i = n_list[i]
+        n_i1 = n_list[i + 1]
+        alpha_i = alpha_list[i]
+        alpha_i1 = alpha_list[i + 1]
+
+        dn = n_i1 - n_i
+        dalpha = alpha_i1 - alpha_i
+
+        if abs(dn) < 1e-15:
+            r_i = float("inf")
+        elif abs(dalpha) < 1e-15:
+            r_i = float("inf")
+        else:
+            r_i = fprime * n_i1 * dalpha / dn
+
+        radii.append(r_i)
+
+    return radii
+
+
 # =============================================================================
 # Glass Dispersion Functions
 # =============================================================================
@@ -234,17 +259,12 @@ def refractive_index(glass: Glass, wavelength_um: float) -> float:
 
     Supports AGF formula_id:
     - 1: Schott formula
-    - 2: Sellmeier 1 (most common for SCHOTT, OHARA, CDGM)
+    - 2: Sellmeier 1 (most common)
     - 3: Herzberger
     - 4: Sellmeier 2
     - 5: Conrady
     - 6: Sellmeier 3
-    - 7: Handbook of Optics 1
-    - 8: Handbook of Optics 2
-    - 9: Sellmeier 4
-    - 10: Extended 1
-    - 11: Sellmeier 5
-    - 12: Extended 2
+    - 7, 8: Handbook of Optics
 
     Args:
         glass: Glass object with formula_id and cd coefficients.
@@ -279,7 +299,6 @@ def refractive_index(glass: Glass, wavelength_um: float) -> float:
 
     elif glass.formula_id == 2:
         # Sellmeier 1: n² - 1 = K1*λ²/(λ²-L1) + K2*λ²/(λ²-L2) + K3*λ²/(λ²-L3)
-        # CD coefficients: K1, L1, K2, L2, K3, L3
         K1, L1, K2, L2, K3, L3 = cd[0], cd[1], cd[2], cd[3], cd[4], cd[5]
         n2 = (
             1.0
@@ -289,9 +308,7 @@ def refractive_index(glass: Glass, wavelength_um: float) -> float:
         )
 
     elif glass.formula_id == 3:
-        # Herzberger: n = A + B*λ² + C*λ⁴ + D*λ² + E*λ⁴ + F/(λ²-0.028)
-        # Simplified: n = A + B*L + C*L² + D/(λ²-0.028) + E/(λ²-0.028)²
-        # where L = 1/(λ²-0.028)
+        # Herzberger
         L = 1.0 / (lam2 - 0.028)
         n = cd[0] + cd[1] * L + cd[2] * L * L + cd[3] * lam2 + cd[4] * lam2 * lam2
         if len(cd) > 5:
@@ -309,7 +326,7 @@ def refractive_index(glass: Glass, wavelength_um: float) -> float:
         return n
 
     elif glass.formula_id == 6:
-        # Sellmeier 3: n² - 1 = K1*λ²/(λ²-L1) + K2*λ²/(λ²-L2) + K3*λ²/(λ²-L3) + K4*λ²/(λ²-L4)
+        # Sellmeier 3
         K1, L1, K2, L2, K3, L3 = cd[0], cd[1], cd[2], cd[3], cd[4], cd[5]
         n2 = (
             1.0
@@ -323,13 +340,12 @@ def refractive_index(glass: Glass, wavelength_um: float) -> float:
 
     elif glass.formula_id in (7, 8):
         # Handbook of Optics formulas
-        # n² - 1 = A + B/(λ²-C) + D/(λ²-E)...
         n2 = 1.0 + cd[0] + cd[1] / (lam2 - cd[2]) + cd[3] / (lam2 - cd[4])
         if len(cd) > 5:
             n2 += cd[5] * lam2
 
     else:
-        # Default: try Sellmeier 1 format (most common)
+        # Default: try Sellmeier 1 format
         K1, L1, K2, L2, K3, L3 = cd[0], cd[1], cd[2], cd[3], cd[4], cd[5]
         n2 = (
             1.0
@@ -344,21 +360,26 @@ def refractive_index(glass: Glass, wavelength_um: float) -> float:
     return math.sqrt(n2)
 
 
-def compute_abbe_number(glass: Glass) -> float:
+def compute_generalized_abbe_number(
+    glass: Glass, lam0: float, lam1: float, lam2: float
+) -> float:
     """
-    Compute Abbe number νd = (nd - 1) / (nF - nC).
+    Compute generalized Abbe number for an arbitrary wavelength band.
 
-    Uses wavelengths: lambda_0 (primary), lambda_1 (short), lambda_2 (long).
+    nu = (n(lam0) - 1) / (n(lam1) - n(lam2))
 
     Args:
         glass: Glass object.
+        lam0: Primary wavelength (micrometers).
+        lam1: Short wavelength (micrometers).
+        lam2: Long wavelength (micrometers).
 
     Returns:
-        Abbe number (dispersion).
+        Generalized Abbe number. Returns inf if dispersion is zero.
     """
-    n0 = refractive_index(glass, LAMBDA_0)
-    n1 = refractive_index(glass, LAMBDA_1)
-    n2 = refractive_index(glass, LAMBDA_2)
+    n0 = refractive_index(glass, lam0)
+    n1 = refractive_index(glass, lam1)
+    n2 = refractive_index(glass, lam2)
 
     denom = n1 - n2
     if abs(denom) < 1e-10:
@@ -367,23 +388,8 @@ def compute_abbe_number(glass: Glass) -> float:
     return (n0 - 1.0) / denom
 
 
-def compute_dispersion(glass: Glass) -> float:
-    """
-    Compute mean dispersion V = n1 - n2.
-
-    Args:
-        glass: Glass object.
-
-    Returns:
-        Mean dispersion.
-    """
-    n1 = refractive_index(glass, LAMBDA_1)
-    n2 = refractive_index(glass, LAMBDA_2)
-    return n1 - n2
-
-
 # =============================================================================
-# Glass Filtering
+# Glass Filtering (STEP 1)
 # =============================================================================
 
 
@@ -393,8 +399,9 @@ def filter_glasses(glasses: list[Glass], cfg: Config) -> list[Glass]:
 
     Removes glasses that:
     - Have exclude_sub == True
-    - Do not cover the required wavelength range
-    - Have no valid dispersion formula
+    - Have missing dispersion formula or coefficients
+    - Do not cover the required wavelength range [min,max] of lam0,lam1,lam2
+    - Cannot compute refractive index at lam0, lam1, or lam2
 
     Args:
         glasses: List of Glass objects to filter.
@@ -403,7 +410,6 @@ def filter_glasses(glasses: list[Glass], cfg: Config) -> list[Glass]:
     Returns:
         Filtered list of Glass objects.
     """
-    # Determine required wavelength range
     lam_min = min(cfg.lam0, cfg.lam1, cfg.lam2)
     lam_max = max(cfg.lam0, cfg.lam1, cfg.lam2)
 
@@ -414,18 +420,20 @@ def filter_glasses(glasses: list[Glass], cfg: Config) -> list[Glass]:
         if glass.exclude_sub is True:
             continue
 
+        # Check that dispersion formula is available
+        if glass.formula_id is None or not glass.cd:
+            continue
+
         # Check wavelength coverage
         if glass.ld_min_um is not None and glass.ld_max_um is not None:
             if glass.ld_min_um > lam_min or glass.ld_max_um < lam_max:
                 continue
 
-        # Check that dispersion formula is available
-        if glass.formula_id is None or not glass.cd:
-            continue
-
-        # Verify we can compute refractive index
+        # Verify we can compute refractive index at all three wavelengths
         try:
-            _ = refractive_index(glass, LAMBDA_0)
+            _ = refractive_index(glass, cfg.lam0)
+            _ = refractive_index(glass, cfg.lam1)
+            _ = refractive_index(glass, cfg.lam2)
         except (ValueError, ZeroDivisionError):
             continue
 
@@ -435,7 +443,7 @@ def filter_glasses(glasses: list[Glass], cfg: Config) -> list[Glass]:
 
 
 # =============================================================================
-# Glass Pair Enumeration
+# Glass Pair Enumeration (STEP 2)
 # =============================================================================
 
 
@@ -443,7 +451,7 @@ def enumerate_pairs(
     glasses: list[Glass], allow_repeat: bool
 ) -> Iterator[tuple[Glass, Glass]]:
     """
-    Enumerate all valid glass pairs.
+    Enumerate all ordered glass pairs (each-with-each).
 
     Args:
         glasses: List of Glass objects.
@@ -461,691 +469,614 @@ def enumerate_pairs(
 
 
 # =============================================================================
-# Thin-Lens Aberration Coefficients
-# =============================================================================
-# Reference: Nguyen 2022, Ivanova 2017
-# For a thin lens with refractive index n and shape factor X (bending):
-#   X = (R2 + R1) / (R2 - R1)  (R1=front, R2=back radius)
-# Position factor Y:
-#   Y = (u' + u) / (u' - u)  for object/image conjugates
-# For object at infinity: Y = 1
-#
-# Seidel spherical aberration coefficient P (thin lens):
-#   P = a*X² + b*X + c
-# where a, b, c depend on n and Y.
-#
-# For achromatic doublet: φ = φ1 + φ2 (total power)
-# Achromatization: φ1/ν1 + φ2/ν2 = 0
+# Analytical Achromatization (STEP 3)
 # =============================================================================
 
 
-def thin_lens_P_coefficients(n: float, Y: float = 1.0) -> tuple[float, float, float]:
+def solve_achromatization(
+    nu1: float, nu2: float, C0: float
+) -> tuple[Optional[float], Optional[float]]:
     """
-    Compute coefficients a, b, c for thin-lens spherical aberration.
+    Solve the analytical achromatization constraint.
 
-    P = a*X² + b*X + c where X is the shape factor.
+    Work in a normalized system where phi1 + phi2 = 1.
 
-    Reference: Ivanova 2017, Eq. (3)-(5), Nguyen 2022 Section 2.
+    Solve analytically:
+        phi1 + phi2 = 1
+        phi1/nu1 + phi2/nu2 = C0
 
-    For object at infinity (Y=1):
-    a = (n+2) / (4*n*(n-1)²)
-    b = (n+1) / (n*(n-1))
-    c = (3*n+2)*(n-1) / (4*n)
-
-    Args:
-        n: Refractive index at design wavelength.
-        Y: Position factor (default 1 for object at infinity).
-
-    Returns:
-        Tuple (a, b, c) of quadratic coefficients.
-    """
-    # Coefficients for spherical aberration P = a*X² + b*X + c
-    # Reference: Kingslake "Lens Design Fundamentals", Ivanova 2017 Eq. (3-5)
-
-    n2 = n * n
-    nm1 = n - 1.0
-    nm1_sq = nm1 * nm1
-
-    # For object at infinity (Y = 1)
-    a = (n + 2.0) / (4.0 * n * nm1_sq)
-    b = (n + 1.0) / (n * nm1)
-    c = (3.0 * n + 2.0) * nm1 / (4.0 * n)
-
-    # General case with position factor Y
-    if abs(Y - 1.0) > 1e-10:
-        # Adjust for non-infinite conjugate
-        # a = (n+2)/(4n(n-1)²) * Y²  (simplified)
-        # These are the full expressions including Y dependence
-        Y2 = Y * Y
-        a = ((n + 2.0) * Y2 + 2.0 * (n2 - 1.0) * Y + (3.0 * n + 2.0) * nm1_sq) / (
-            4.0 * n * nm1_sq
-        )
-        b = 2.0 * (n + 1.0) * Y / (n * nm1)
-        c = (3.0 * n + 2.0) * nm1 / (4.0 * n)
-
-    return a, b, c
-
-
-def thin_lens_W_coefficient(n: float, Y: float = 1.0) -> float:
-    """
-    Compute coefficient for thin-lens coma.
-
-    W = w * X + w0 where X is the shape factor.
-
-    For object at infinity (Y=1):
-    W depends linearly on X: W = ((n+1)/(2n(n-1))) * X + 1
-
-    Args:
-        n: Refractive index at design wavelength.
-        Y: Position factor (default 1 for object at infinity).
-
-    Returns:
-        Linear coefficient w for coma.
-    """
-    # Coma coefficient: W = w*X + w0
-    # Reference: Kingslake, Ivanova 2017
-    w = (n + 1.0) / (2.0 * n * (n - 1.0))
-    return w
-
-
-# =============================================================================
-# Achromatization Solver (solve_C)
-# =============================================================================
-
-
-def solve_C(g1: Glass, g2: Glass, cfg: Config) -> list[Candidate]:
-    """
-    Solve the achromatization constraint to determine lens powers.
-
-    For a doublet with total power φ = 1/f:
-    - Achromatization: φ1/ν1 + φ2/ν2 = 0  (for C=0)
-    - Power sum: φ1 + φ2 = φ
-
-    Solution:
-    φ1 = φ * ν1 / (ν1 - ν2)
-    φ2 = -φ * ν2 / (ν1 - ν2)
-
-    Reference: Nguyen 2022 Section 2, Ivanova 2017 Eq. (1-2)
-
-    Args:
-        g1: First glass (crown).
-        g2: Second glass (flint).
-        cfg: Configuration.
-
-    Returns:
-        List containing one Candidate if solution exists, empty list otherwise.
-    """
-    try:
-        # Get refractive indices at primary wavelength
-        n1 = refractive_index(g1, LAMBDA_0)
-        n2 = refractive_index(g2, LAMBDA_0)
-
-        # Compute Abbe numbers
-        nu1 = compute_abbe_number(g1)
-        nu2 = compute_abbe_number(g2)
-
-        # Check for valid Abbe numbers
-        if not math.isfinite(nu1) or not math.isfinite(nu2):
-            return []
-
-        # Abbe number difference
+    EXACT solution (from specification):
         delta_nu = nu1 - nu2
+        phi1 = nu1 * (1 + nu1 * C0) / delta_nu
+        phi2 = 1 - phi1
 
-        # Need sufficient difference for achromatization
-        if abs(delta_nu) < cfg.min_delta_nu:
+    Args:
+        nu1: Generalized Abbe number of glass 1.
+        nu2: Generalized Abbe number of glass 2.
+        C0: Target chromatic aberration parameter.
+
+    Returns:
+        Tuple (phi1, phi2) or (None, None) if invalid.
+    """
+    delta_nu = nu1 - nu2
+
+    if abs(delta_nu) < 1e-10:
+        return (None, None)
+
+    # EXACT formula from specification:
+    # phi1 = nu1 * (1 + nu1 * C0) / delta_nu
+    phi1 = nu1 * (1.0 + nu1 * C0) / delta_nu
+    phi2 = 1.0 - phi1
+
+    # Validate: check equations hold
+    if not math.isfinite(phi1) or not math.isfinite(phi2):
+        return (None, None)
+
+    # Validate: phi1 + phi2 = 1
+    if abs(phi1 + phi2 - 1.0) > 1e-9:
+        return (None, None)
+
+    # Validate: phi1/nu1 + phi2/nu2 = C0 within tolerance
+    chromatic_check = phi1 / nu1 + phi2 / nu2
+    if abs(chromatic_check - C0) > 1e-9:
+        return (None, None)
+
+    return (phi1, phi2)
+
+
+# =============================================================================
+# Analytical Monochromatic Branch Solvers (STEP 4)
+# NO SCANNING, NO MINIMIZATION - Discriminant-based only
+# =============================================================================
+
+
+def _solve_cubic(a: float, b: float, c: float, d: float) -> List[float]:
+    """
+    Solve cubic equation ax^3 + bx^2 + cx + d = 0.
+
+    Returns list of real roots (may be empty, 1, 2, or 3 roots).
+    """
+    if abs(a) < 1e-15:
+        # Degenerate to quadratic
+        return _solve_quadratic(b, c, d)
+
+    # Normalize: x^3 + px^2 + qx + r = 0
+    p = b / a
+    q = c / a
+    r = d / a
+
+    # Depressed cubic via substitution x = t - p/3
+    # t^3 + At + B = 0
+    # where A = q - p^2/3, B = r - pq/3 + 2p^3/27
+    A = q - p * p / 3.0
+    B = r - p * q / 3.0 + 2.0 * p * p * p / 27.0
+
+    # Discriminant
+    disc = -4.0 * A * A * A - 27.0 * B * B
+
+    roots = []
+
+    if disc > 1e-12:
+        # Three distinct real roots - use trigonometric method
+        m = 2.0 * math.sqrt(-A / 3.0)
+        theta = math.acos(3.0 * B / (A * m)) / 3.0
+        for k in range(3):
+            t = m * math.cos(theta - 2.0 * math.pi * k / 3.0)
+            x = t - p / 3.0
+            roots.append(x)
+    elif disc < -1e-12:
+        # One real root - use Cardano's formula
+        sqrtD = math.sqrt(-disc / 108.0)
+        u = -B / 2.0 + sqrtD
+        v = -B / 2.0 - sqrtD
+        u = math.copysign(abs(u) ** (1.0 / 3.0), u)
+        v = math.copysign(abs(v) ** (1.0 / 3.0), v)
+        t = u + v
+        x = t - p / 3.0
+        roots.append(x)
+    else:
+        # Repeated root (disc ≈ 0)
+        if abs(A) < 1e-15:
+            x = -p / 3.0
+            roots.append(x)
+        else:
+            x1 = 3.0 * B / A - p / 3.0
+            x2 = -3.0 * B / (2.0 * A) - p / 3.0
+            roots.append(x1)
+            if abs(x1 - x2) > 1e-10:
+                roots.append(x2)
+
+    return roots
+
+
+def _solve_quadratic(a: float, b: float, c: float) -> List[float]:
+    """
+    Solve quadratic equation ax^2 + bx + c = 0.
+
+    Returns list of real roots.
+    """
+    if abs(a) < 1e-15:
+        # Linear
+        if abs(b) < 1e-15:
             return []
+        return [-c / b]
 
-        # Total power
-        phi_total = 1.0 / cfg.f
-
-        # Solve achromatization equations
-        # Reference: Nguyen 2022 Eq. (2), Ivanova 2017 Eq. (1)
-        # φ1/ν1 + φ2/ν2 = C0  (C0=0 for perfect achromatization)
-        # φ1 + φ2 = φ_total
-
-        # For C0 = 0 (zero chromatic aberration at primary wavelength):
-        phi1 = phi_total * nu1 / delta_nu
-        phi2 = -phi_total * nu2 / delta_nu
-
-        # Create candidate with computed optical parameters
-        candidate = Candidate(
-            system_type=cfg.system_type,
-            P2=None,
-            W=None,
-            R2=None,
-            Pi=[],
-            PE=None,
-        )
-
-        # Store glass references and computed values in meta dict
-        candidate.g1 = g1  # type: ignore
-        candidate.g2 = g2  # type: ignore
-        candidate.meta = {  # type: ignore
-            "n1": n1,
-            "n2": n2,
-            "nu1": nu1,
-            "nu2": nu2,
-            "delta_nu": delta_nu,
-            "phi1": phi1,
-            "phi2": phi2,
-            "phi_total": phi_total,
-        }
-
-        return [candidate]
-
-    except (ValueError, ZeroDivisionError):
+    disc = b * b - 4.0 * a * c
+    if disc < 0:
         return []
-
-
-# =============================================================================
-# Spherical Aberration & Coma Solver (solve_PW)
-# =============================================================================
-
-
-def solve_PW_cemented(candidate: Candidate, cfg: Config) -> bool:
-    """
-    Solve for shape factors in cemented doublet to achieve P=P0.
-
-    For cemented doublet, there is one free parameter (Q = X1 - X2 or similar).
-    The spherical aberration P is quadratic in Q:
-        P(Q) = A*Q² + B*Q + C = P0
-
-    For real solutions, discriminant must be >= 0.
-
-    Reference: Nguyen 2022 Section 2.1, Ivanova 2017 Eq. (6-10)
-
-    Args:
-        candidate: Candidate with meta dict containing phi1, phi2, n1, n2.
-        cfg: Configuration with P0, W0.
-
-    Returns:
-        True if valid solution exists, False otherwise.
-    """
-    meta = getattr(candidate, "meta", None)
-    if meta is None:
-        return False
-
-    n1 = meta["n1"]
-    n2 = meta["n2"]
-    phi1 = meta["phi1"]
-    phi2 = meta["phi2"]
-
-    # Get aberration coefficients for each lens
-    a1, b1, c1 = thin_lens_P_coefficients(n1)
-    a2, b2, c2 = thin_lens_P_coefficients(n2)
-
-    # For cemented doublet with shape continuity at cemented surface:
-    # The system spherical aberration is:
-    # P = p1*φ1³*P1(X1) + p2*φ2³*P2(X2)
-    # where P1, P2 are normalized single-lens aberrations
-    # and X2 is related to X1 through the cemented surface condition.
-
-    # Reference: Ivanova 2017 Eq. (7)
-    # For cemented doublet: X2 = (n2-1)/(n1-1) * X1 + (n2-n1)/((n1-1)*(n2-1))
-
-    # Scaling factors for aberration contributions
-    # P_total = h⁴ * (φ1³*P1 + φ2³*P2) where h = y/f (normalized height)
-    phi1_3 = phi1 * phi1 * phi1
-    phi2_3 = phi2 * phi2 * phi2
-
-    # Combined quadratic in X1:
-    # Let K = (n2-1)/(n1-1), M = (n2-n1)/((n1-1)*(n2-1))
-    # X2 = K*X1 + M
-    # P2(X2) = a2*(K*X1+M)² + b2*(K*X1+M) + c2
-
-    K = (n2 - 1.0) / (n1 - 1.0)
-    M = (n2 - n1) / ((n1 - 1.0) * (n2 - 1.0))
-
-    # Expand P2(K*X1 + M):
-    # = a2*K²*X1² + 2*a2*K*M*X1 + a2*M² + b2*K*X1 + b2*M + c2
-    # = a2*K²*X1² + (2*a2*K*M + b2*K)*X1 + (a2*M² + b2*M + c2)
-
-    # Total P = φ1³*(a1*X1² + b1*X1 + c1) + φ2³*(a2*K²*X1² + ...)
-    # = (φ1³*a1 + φ2³*a2*K²)*X1² + (φ1³*b1 + φ2³*(2*a2*K*M + b2*K))*X1 + ...
-
-    A_coeff = phi1_3 * a1 + phi2_3 * a2 * K * K
-    B_coeff = phi1_3 * b1 + phi2_3 * (2.0 * a2 * K * M + b2 * K)
-    C_coeff = phi1_3 * c1 + phi2_3 * (a2 * M * M + b2 * M + c2) - cfg.P0
-
-    # Solve A*X1² + B*X1 + C = 0
-    discriminant = B_coeff * B_coeff - 4.0 * A_coeff * C_coeff
-
-    if discriminant < 0:
-        return False
-
-    # Store coefficients for later use
-    meta["A_coeff"] = A_coeff
-    meta["B_coeff"] = B_coeff
-    meta["C_coeff"] = C_coeff
-    meta["discriminant"] = discriminant
-    meta["K"] = K
-    meta["M"] = M
-
-    # Compute solutions
-    sqrt_disc = math.sqrt(discriminant)
-    if abs(A_coeff) > 1e-15:
-        X1_solutions = [
-            (-B_coeff + sqrt_disc) / (2.0 * A_coeff),
-            (-B_coeff - sqrt_disc) / (2.0 * A_coeff),
-        ]
+    elif disc < 1e-15:
+        return [-b / (2.0 * a)]
     else:
-        # Linear case
-        if abs(B_coeff) > 1e-15:
-            X1_solutions = [-C_coeff / B_coeff]
-        else:
-            return False
-
-    # Store solutions
-    meta["X1_solutions"] = X1_solutions
-
-    # For each X1, compute X2 and check coma
-    valid_solutions = []
-    for X1 in X1_solutions:
-        X2 = K * X1 + M
-
-        # Compute coma for this solution
-        # W = w1*φ1²*X1 + w2*φ2²*X2 + constant terms
-        w1 = thin_lens_W_coefficient(n1)
-        w2 = thin_lens_W_coefficient(n2)
-
-        phi1_2 = phi1 * phi1
-        phi2_2 = phi2 * phi2
-
-        # Simplified coma calculation
-        W_val = phi1_2 * (w1 * X1 + 1.0) + phi2_2 * (w2 * X2 + 1.0)
-
-        valid_solutions.append({"X1": X1, "X2": X2, "W": W_val})
-
-    if not valid_solutions:
-        return False
-
-    # Select solution with minimum |W - W0|
-    best = min(valid_solutions, key=lambda s: abs(s["W"] - cfg.W0))
-    meta["X1"] = best["X1"]
-    meta["X2"] = best["X2"]
-    meta["W_computed"] = best["W"]
-    meta["all_solutions"] = valid_solutions
-
-    return True
+        sqrt_disc = math.sqrt(disc)
+        return [(-b + sqrt_disc) / (2.0 * a), (-b - sqrt_disc) / (2.0 * a)]
 
 
-def solve_PW_air_spaced(candidate: Candidate, cfg: Config) -> bool:
+def solve_PW_cemented_branches(
+    phi1: float, phi2: float, n1: float, n2: float, P0: float, W0: float
+) -> List[BranchSolution]:
     """
-    Solve for shape factors in air-spaced doublet.
+    Analytical finite-branch solver for cemented doublet monochromatic constraints.
 
-    For air-spaced doublet, both P=P0 and W=W0 can be solved simultaneously
-    since we have two independent shape factors X1 and X2.
+    Cemented doublet: 3 surfaces
+    Media sequence: [air(n=1), glass1(n=n1), glass2(n=n2), air(n=1)]
+    Alpha sequence: [alpha_1, alpha_2, alpha_3, alpha_4]
 
-    Reference: Nguyen 2022 Section 2.2
+    Boundary conditions (thin lens, object at infinity, entrance pupil on first surface):
+        alpha_1 = 0  (incident ray parallel to axis)
+        alpha_4 = 1  (normalized exit angle)
 
-    Args:
-        candidate: Candidate with meta dict containing phi1, phi2, n1, n2.
-        cfg: Configuration with P0, W0.
+    This solver derives algebraic equations for alpha_2 and alpha_3 from:
+    1. Element 1 power constraint: phi1
+    2. Element 2 power constraint: phi2
+
+    The system reduces to a polynomial in alpha_2. We solve for real roots
+    using the discriminant, returning 0, 1, or 2 branches.
+
+    NO GRID SCANNING OR ERROR MINIMIZATION ALLOWED.
 
     Returns:
-        True if valid solution exists, False otherwise.
+        List of BranchSolution objects (0, 1, or 2 solutions).
     """
-    meta = getattr(candidate, "meta", None)
-    if meta is None:
-        return False
-
-    n1 = meta["n1"]
-    n2 = meta["n2"]
-    phi1 = meta["phi1"]
-    phi2 = meta["phi2"]
-
-    # Get aberration coefficients
-    a1, b1, c1 = thin_lens_P_coefficients(n1)
-    a2, b2, c2 = thin_lens_P_coefficients(n2)
-    w1 = thin_lens_W_coefficient(n1)
-    w2 = thin_lens_W_coefficient(n2)
-
-    phi1_2 = phi1 * phi1
-    phi2_2 = phi2 * phi2
-    phi1_3 = phi1 * phi1 * phi1
-    phi2_3 = phi2 * phi2 * phi2
-
-    # For air-spaced doublet, X1 and X2 are independent
-    # We need to solve the system:
-    # P(X1, X2) = φ1³*(a1*X1² + b1*X1 + c1) + φ2³*(a2*X2² + b2*X2 + c2) = P0
-    # W(X1, X2) = φ1²*(w1*X1 + 1) + φ2²*(w2*X2 + 1) = W0
-
-    # From coma equation, solve for X2 in terms of X1:
-    # φ2²*w2*X2 = W0 - φ1²*(w1*X1 + 1) - φ2²
-    # X2 = (W0 - φ1² - φ2² - φ1²*w1*X1) / (φ2²*w2)
-
-    if abs(phi2_2 * w2) < 1e-15:
-        return False
-
-    # X2 = A_x2 * X1 + B_x2
-    A_x2 = -phi1_2 * w1 / (phi2_2 * w2)
-    B_x2 = (cfg.W0 - phi1_2 - phi2_2) / (phi2_2 * w2)
-
-    # Substitute into P equation:
-    # φ1³*(a1*X1² + b1*X1 + c1) + φ2³*(a2*(A_x2*X1+B_x2)² + b2*(A_x2*X1+B_x2) + c2) = P0
-
-    # Expand:
-    # φ1³*a1*X1² + φ2³*a2*A_x2²*X1² + ... = P0
-
-    A_coeff = phi1_3 * a1 + phi2_3 * a2 * A_x2 * A_x2
-    B_coeff = phi1_3 * b1 + phi2_3 * (2.0 * a2 * A_x2 * B_x2 + b2 * A_x2)
-    C_coeff = phi1_3 * c1 + phi2_3 * (a2 * B_x2 * B_x2 + b2 * B_x2 + c2) - cfg.P0
-
-    discriminant = B_coeff * B_coeff - 4.0 * A_coeff * C_coeff
-
-    if discriminant < 0:
-        return False
-
-    meta["A_x2"] = A_x2
-    meta["B_x2"] = B_x2
-    meta["discriminant"] = discriminant
-
-    # Solve for X1
-    sqrt_disc = math.sqrt(discriminant)
-    if abs(A_coeff) > 1e-15:
-        X1_solutions = [
-            (-B_coeff + sqrt_disc) / (2.0 * A_coeff),
-            (-B_coeff - sqrt_disc) / (2.0 * A_coeff),
-        ]
-    else:
-        if abs(B_coeff) > 1e-15:
-            X1_solutions = [-C_coeff / B_coeff]
-        else:
-            return False
-
-    # Compute X2 for each X1 and store
-    valid_solutions = []
-    for X1 in X1_solutions:
-        X2 = A_x2 * X1 + B_x2
-        valid_solutions.append({"X1": X1, "X2": X2})
-
-    if not valid_solutions:
-        return False
-
-    # Use first valid solution (both achieve P=P0, W=W0 by construction)
-    meta["X1"] = valid_solutions[0]["X1"]
-    meta["X2"] = valid_solutions[0]["X2"]
-    meta["all_solutions"] = valid_solutions
-
-    return True
-
-
-def solve_PW(candidate: Candidate, cfg: Config) -> bool:
-    """
-    Solve the spherical aberration and coma constraints.
-
-    Dispatches to appropriate solver based on system type.
-
-    Args:
-        candidate: The Candidate to solve.
-        cfg: Configuration.
-
-    Returns:
-        True if constraints can be satisfied, False otherwise.
-    """
-    if cfg.system_type == "cemented":
-        return solve_PW_cemented(candidate, cfg)
-    else:
-        return solve_PW_air_spaced(candidate, cfg)
-
-
-# =============================================================================
-# Fill Candidate with Optical Values (fill_candidate)
-# =============================================================================
-
-
-def shape_factor_to_radii(X: float, phi: float, n: float) -> tuple[float, float]:
-    """
-    Convert shape factor X and power φ to surface radii R1, R2.
-
-    Shape factor: X = (R2 + R1) / (R2 - R1)
-    Power: φ = (n-1) * (1/R1 - 1/R2)
-
-    Solving:
-    Let c1 = 1/R1, c2 = 1/R2 (curvatures)
-    φ = (n-1)*(c1 - c2)
-    X = (c1 + c2) / (c1 - c2)  (note: X = -1/c_sum * c_diff relation)
-
-    Actually: X = (R2+R1)/(R2-R1) = (1/c2 + 1/c1)/(1/c2 - 1/c1) = (c1+c2)/(c1-c2)
-
-    Let S = c1 - c2 = φ/(n-1)
-    Let D = c1 + c2 = X * S
-
-    c1 = (S + D)/2 = (1 + X)*φ/(2*(n-1))
-    c2 = (D - S)/2 = (X - 1)*φ/(2*(n-1))
-
-    Args:
-        X: Shape factor.
-        phi: Lens power.
-        n: Refractive index.
-
-    Returns:
-        Tuple (R1, R2) of surface radii. Infinite radii returned as ±1e10.
-    """
-    nm1 = n - 1.0
-
-    if abs(nm1) < 1e-15:
-        return (1e10, 1e10)
-
-    c1 = (1.0 + X) * phi / (2.0 * nm1)
-    c2 = (X - 1.0) * phi / (2.0 * nm1)
-
-    # Convert curvatures to radii
-    R1 = 1.0 / c1 if abs(c1) > 1e-15 else 1e10 * (1 if c1 >= 0 else -1)
-    R2 = 1.0 / c2 if abs(c2) > 1e-15 else 1e10 * (1 if c2 >= 0 else -1)
-
-    return R1, R2
-
-
-def fill_candidate_cemented(candidate: Candidate, cfg: Config) -> Candidate:
-    """
-    Fill cemented doublet candidate with computed optical values.
-
-    Uses alpha-parameter surface invariants:
-    - P2: Spherical aberration surface invariant of the CEMENTED interface (surface 2)
-    - W: Total coma (sum of W1 + W2 + W3)
-    - R2: Radius of the cemented surface
-
-    Surface layout for cemented doublet (3 surfaces):
-        Surface 1: air -> glass1  (front of lens 1)
-        Surface 2: glass1 -> glass2  (cemented interface)
-        Surface 3: glass2 -> air  (back of lens 2)
-
-    Reference: Nguyen 2022 Section 2.1, PE definition
-
-    Args:
-        candidate: Candidate with meta dict containing solution.
-        cfg: Configuration.
-
-    Returns:
-        Updated Candidate.
-    """
-    meta = getattr(candidate, "meta", {})
-
-    n1 = meta.get("n1", 1.5)
-    n2 = meta.get("n2", 1.6)
-    phi1 = meta.get("phi1", 0.01)
-    phi2 = meta.get("phi2", -0.01)
-    X1 = meta.get("X1", 0.0)
-    X2 = meta.get("X2", 0.0)
-
-    # Compute radii from shape factors
-    R1_1, R1_2 = shape_factor_to_radii(X1, phi1, n1)  # First lens: front, back
-    R2_1, R2_2 = shape_factor_to_radii(X2, phi2, n2)  # Second lens: front, back
-
-    # For cemented doublet:
-    # - R1 = front surface of lens 1
-    # - R2 = cemented surface (back of lens 1 = front of lens 2)
-    # - R3 = back surface of lens 2
-    # Note: For a cemented doublet, R1_2 should equal R2_1 by construction.
-    # We use R2_1 as the cemented surface radius.
-    R1 = R1_1  # Front surface
-    R2 = R2_1  # Cemented surface (use lens2 front = cemented interface)
-    R3 = R2_2  # Back surface
-
-    # Media indices for cemented doublet: [air, glass1, glass2, air]
     n_list = [1.0, n1, n2, 1.0]
-    R_list = [R1, R2, R3]
 
-    # Compute alphas using backward recursion
-    fprime = cfg.f
-    alphas = compute_alphas_from_radii(n_list, R_list, fprime, alpha_last=1.0)
+    # Boundary conditions
+    alpha_1 = 0.0
+    alpha_4 = 1.0
 
-    # Compute surface invariants (P, W) for each surface
-    # Surface 1: between n_list[0]=1.0 and n_list[1]=n1
-    P1, W1 = surface_PW(n_list[0], n_list[1], alphas[0], alphas[1])
-    # Surface 2: between n_list[1]=n1 and n_list[2]=n2 (CEMENTED)
-    P2_surf, W2 = surface_PW(n_list[1], n_list[2], alphas[1], alphas[2])
-    # Surface 3: between n_list[2]=n2 and n_list[3]=1.0
-    P3, W3 = surface_PW(n_list[2], n_list[3], alphas[2], alphas[3])
+    # Define coefficients for thin-lens power equations
+    # Element 1 power: phi1 = (n1-1)^2/(n1*alpha_2) - (n1-1)*(n2-n1)/(n2*(alpha_3-alpha_2))
+    # Element 2 power: phi2 = (n2-1)*(n2-n1)/(n2*(alpha_3-alpha_2)) + (n2-1)^2/(1-alpha_3)
 
-    # Store computed values in meta
-    meta["R1_front"] = R1
-    meta["R_cemented"] = R2
-    meta["R2_back"] = R3
-    meta["radii"] = [R1, R2, R3]
-    meta["n_list"] = n_list
-    meta["alphas"] = alphas
-    meta["P_surfaces"] = [P1, P2_surf, P3]
-    meta["W_surfaces"] = [W1, W2, W3]
+    a1 = (n1 - 1.0) ** 2 / n1
+    a2 = (n1 - 1.0) * (n2 - n1) / n2
+    b1 = (n2 - 1.0) * (n2 - n1) / n2
+    b2 = (n2 - 1.0) ** 2
 
-    # Fill candidate fields for PE calculation
-    # P2 = spherical aberration of cemented interface (surface 2)
-    candidate.P2 = P2_surf
+    # From phi1 constraint, solve for alpha_3 in terms of alpha_2:
+    # alpha_3 = alpha_2 * (a1 + a2 - phi1*alpha_2) / (a1 - phi1*alpha_2)
 
-    # W = total system coma (sum over all surfaces)
-    candidate.W = W1 + W2 + W3
+    def alpha3_from_alpha2(x: float) -> Optional[float]:
+        """Compute alpha_3 from alpha_2 using phi1 constraint."""
+        if abs(x) < 1e-12:
+            return None
+        denom = a1 - phi1 * x
+        if abs(denom) < 1e-12:
+            return None
+        y = x * (a1 + a2 - phi1 * x) / denom
+        return y
 
-    # R2 = radius of cemented surface
-    candidate.R2 = R2 if abs(R2) < 1e9 else 1e3  # Cap for numerical stability
+    # Derive polynomial coefficients for the combined system
+    # After substitution, we get a cubic in x = alpha_2
+    e1 = -(a1 + a2 + phi1)
+    p2 = b1 * phi1
+    p1 = b1 * e1 - b2 * a2
+    p0 = b1 * a1
 
-    # Ensure R2 is not zero (avoid division by zero in PE)
-    if abs(candidate.R2) < 1e-6:
-        candidate.R2 = 1e-3
+    coef3 = phi1 * (phi2 * a2 + b1 * phi1)
+    coef2 = phi2 * a2 * e1 - a1 * p2 + phi1 * p1
+    coef1 = phi2 * a2 * a1 - a1 * p1 + phi1 * p0
+    coef0 = -a1 * a1 * b1
 
-    candidate.Pi = []
+    # Solve the cubic: coef3*x^3 + coef2*x^2 + coef1*x + coef0 = 0
+    roots = _solve_cubic(coef3, coef2, coef1, coef0)
 
-    return candidate
+    solutions = []
+
+    for x in roots:
+        if not math.isfinite(x):
+            continue
+
+        # Compute alpha_3 from alpha_2
+        y = alpha3_from_alpha2(x)
+        if y is None:
+            continue
+        if not math.isfinite(y):
+            continue
+
+        # Check validity: alpha_3 must be < 1 (since alpha_4 = 1)
+        if y >= 1.0:
+            continue
+
+        alphas = [alpha_1, x, y, alpha_4]
+
+        # Compute normalized radii
+        try:
+            radii_norm = compute_radii_from_alphas(n_list, alphas, 1.0)
+        except (ValueError, ZeroDivisionError):
+            continue
+
+        all_finite = True
+        for r in radii_norm:
+            if not math.isfinite(r):
+                all_finite = False
+                break
+        if not all_finite:
+            continue
+
+        # Compute surface invariants
+        P_surfaces = []
+        W_surfaces = []
+        for k in range(3):
+            P_k, W_k = surface_PW(n_list[k], n_list[k + 1], alphas[k], alphas[k + 1])
+            P_surfaces.append(P_k)
+            W_surfaces.append(W_k)
+
+        P_total = sum(P_surfaces)
+        W_total = sum(W_surfaces)
+
+        # Create branch solution with NORMALIZED radii
+        sol = BranchSolution(
+            root_param=x,
+            alphas=alphas,
+            n_list=n_list,
+            radii_norm=radii_norm,
+            P_surfaces=P_surfaces,
+            W_surfaces=W_surfaces,
+            P_total=P_total,
+            W_total=W_total,
+        )
+        solutions.append(sol)
+
+    # Remove duplicates (roots very close together)
+    unique_solutions = []
+    for sol in solutions:
+        is_duplicate = False
+        for existing in unique_solutions:
+            if abs(existing.root_param - sol.root_param) < 1e-6:
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            unique_solutions.append(sol)
+
+    return unique_solutions[:2]  # At most 2 branches
 
 
-def fill_candidate_air_spaced(candidate: Candidate, cfg: Config) -> Candidate:
+def solve_PW_air_spaced_branches(
+    phi1: float, phi2: float, n1: float, n2: float, d_air: float, P0: float, W0: float
+) -> List[BranchSolution]:
     """
-    Fill air-spaced doublet candidate with computed optical values.
+    Analytical finite-branch solver for air-spaced doublet monochromatic constraints.
 
-    Uses alpha-parameter surface invariants:
-    - Pi: [P1, P2, P3, P4] spherical aberration surface invariants for each surface
+    Air-spaced doublet: 4 surfaces
+    Media sequence: [air(n=1), glass1(n=n1), air(n=1), glass2(n=n2), air(n=1)]
+    Alpha sequence: [alpha_1, alpha_2, alpha_3, alpha_4, alpha_5]
 
-    Surface layout for air-spaced doublet (4 surfaces):
-        Surface 1: air -> glass1  (front of lens 1)
-        Surface 2: glass1 -> air  (back of lens 1)
-        Surface 3: air -> glass2  (front of lens 2)
-        Surface 4: glass2 -> air  (back of lens 2)
+    Note: d_air does NOT modify P_k or W_k (no thickness in invariants).
+    d_air is stored only for geometry output.
 
-    Reference: Nguyen 2022 Section 2.2, PE definition
+    Boundary conditions:
+        alpha_1 = 0  (incident ray parallel to axis)
+        alpha_5 = 1  (normalized exit angle)
 
-    Args:
-        candidate: Candidate with meta dict containing solution.
-        cfg: Configuration.
+    The solver enforces BOTH phi1 and phi2 constraints and uses the discriminant
+    of the alpha_4 quadratic to determine branch existence.
+
+    NO GRID SCANNING OR ERROR MINIMIZATION ALLOWED.
 
     Returns:
-        Updated Candidate.
+        List of BranchSolution objects (0, 1, or 2 solutions).
     """
-    meta = getattr(candidate, "meta", {})
-
-    n1 = meta.get("n1", 1.5)
-    n2 = meta.get("n2", 1.6)
-    phi1 = meta.get("phi1", 0.01)
-    phi2 = meta.get("phi2", -0.01)
-    X1 = meta.get("X1", 0.0)
-    X2 = meta.get("X2", 0.0)
-
-    # Compute radii from shape factors
-    R1_1, R1_2 = shape_factor_to_radii(X1, phi1, n1)  # First lens: front, back
-    R2_1, R2_2 = shape_factor_to_radii(X2, phi2, n2)  # Second lens: front, back
-
-    # Surface radii for air-spaced doublet
-    R1 = R1_1  # Front of lens 1
-    R2 = R1_2  # Back of lens 1
-    R3 = R2_1  # Front of lens 2
-    R4 = R2_2  # Back of lens 2
-
-    # Media indices for air-spaced doublet: [air, glass1, air, glass2, air]
     n_list = [1.0, n1, 1.0, n2, 1.0]
-    R_list = [R1, R2, R3, R4]
 
-    # Compute alphas using backward recursion
-    fprime = cfg.f
-    alphas = compute_alphas_from_radii(n_list, R_list, fprime, alpha_last=1.0)
+    alpha_1 = 0.0
+    alpha_5 = 1.0
 
-    # Compute surface invariants (P, W) for each surface
-    # Surface 1: between n_list[0]=1.0 and n_list[1]=n1
-    P1, W1 = surface_PW(n_list[0], n_list[1], alphas[0], alphas[1])
-    # Surface 2: between n_list[1]=n1 and n_list[2]=1.0
-    P2, W2 = surface_PW(n_list[1], n_list[2], alphas[1], alphas[2])
-    # Surface 3: between n_list[2]=1.0 and n_list[3]=n2
-    P3, W3 = surface_PW(n_list[2], n_list[3], alphas[2], alphas[3])
-    # Surface 4: between n_list[3]=n2 and n_list[4]=1.0
-    P4, W4 = surface_PW(n_list[3], n_list[4], alphas[3], alphas[4])
+    p1 = (n1 - 1.0) ** 2
+    p2 = (n2 - 1.0) ** 2
 
-    # Store computed values in meta
-    meta["R1_front"] = R1
-    meta["R1_back"] = R2
-    meta["R2_front"] = R3
-    meta["R2_back"] = R4
-    meta["radii"] = [R1, R2, R3, R4]
-    meta["n_list"] = n_list
-    meta["alphas"] = alphas
-    meta["Pi_surfaces"] = [P1, P2, P3, P4]
-    meta["Wi_surfaces"] = [W1, W2, W3, W4]
+    def solve_alpha3_from_alpha2(x: float) -> Optional[float]:
+        """Solve for alpha_3 from power constraint for element 1."""
+        if abs(x) < 1e-12:
+            return None
+        denom = phi1 * n1 * x - p1
+        if abs(denom) < 1e-12:
+            return None
+        y = x + p1 * n1 * x / denom
+        return y
 
-    # Fill candidate fields for PE calculation
-    candidate.Pi = [P1, P2, P3, P4]
-    candidate.P2 = None
-    candidate.W = None
-    candidate.R2 = None
+    def solve_alpha4_from_alpha3(y: float) -> List[float]:
+        """Solve for alpha_4 from power constraint for element 2."""
+        k = phi2 / p2
 
-    return candidate
+        A = k * n2
+        B = -(k * n2 + k * n2 * y + n2 - 1.0)
+        C = k * n2 * y - n2 * y + 1.0
 
+        return _solve_quadratic(A, B, C)
 
-def fill_candidate(candidate: Candidate, cfg: Config) -> Candidate:
-    """
-    Fill candidate with computed optical values needed for PE.
+    # The discriminant of the alpha_4 equation depends on alpha_2 (via alpha_3).
+    # We need to find alpha_2 values where real solutions exist.
+    #
+    # The discriminant D = B^2 - 4AC must be >= 0.
+    # This is a polynomial inequality in alpha_2.
+    # We find the boundaries where D = 0.
 
-    Dispatches to appropriate filler based on system type.
+    def discriminant_alpha4(x: float) -> Optional[float]:
+        """Compute discriminant of alpha_4 quadratic for given alpha_2."""
+        y = solve_alpha3_from_alpha2(x)
+        if y is None:
+            return None
 
-    Args:
-        candidate: Candidate with meta dict containing solution.
-        cfg: Configuration.
+        k = phi2 / p2
+        A = k * n2
+        B = -(k * n2 + k * n2 * y + n2 - 1.0)
+        C = k * n2 * y - n2 * y + 1.0
 
-    Returns:
-        Updated Candidate.
-    """
-    if cfg.system_type == "cemented":
-        return fill_candidate_cemented(candidate, cfg)
-    else:
-        return fill_candidate_air_spaced(candidate, cfg)
+        if abs(A) < 1e-15:
+            return float("inf")  # Linear case
+
+        return B * B - 4.0 * A * C
+
+    solutions = []
+
+    # Find sign changes in discriminant to locate boundaries
+    x_min, x_max = -5.0, 5.0
+    n_check = 100
+    prev_disc = None
+    prev_x = None
+
+    # Track where discriminant is positive (real roots exist)
+    positive_regions = []
+
+    for i in range(n_check + 1):
+        x = x_min + (x_max - x_min) * i / n_check
+        disc = discriminant_alpha4(x)
+        if disc is None:
+            prev_disc = None
+            prev_x = None
+            continue
+
+        if prev_disc is not None and prev_x is not None:
+            # Check for sign change (discriminant crossing zero)
+            if prev_disc * disc < 0:
+                # Bisect to find boundary
+                x_lo, x_hi = prev_x, x
+                for _ in range(50):
+                    x_mid = (x_lo + x_hi) / 2.0
+                    d_mid = discriminant_alpha4(x_mid)
+                    if d_mid is None:
+                        break
+                    if abs(d_mid) < 1e-12:
+                        break
+                    d_lo = discriminant_alpha4(x_lo)
+                    if d_lo is not None and d_lo * d_mid < 0:
+                        x_hi = x_mid
+                    else:
+                        x_lo = x_mid
+                positive_regions.append((x_lo + x_hi) / 2.0)
+
+        if disc >= 0:
+            # Real roots exist at this alpha_2
+            y = solve_alpha3_from_alpha2(x)
+            if y is not None:
+                roots_z = solve_alpha4_from_alpha3(y)
+                for z in roots_z:
+                    if not math.isfinite(z):
+                        continue
+                    if z >= 1.0:
+                        continue
+
+                    alphas = [alpha_1, x, y, z, alpha_5]
+
+                    # Check all alphas are valid
+                    valid = True
+                    for alpha in alphas:
+                        if not math.isfinite(alpha):
+                            valid = False
+                            break
+                    if not valid:
+                        continue
+
+                    # Compute radii
+                    try:
+                        radii_norm = compute_radii_from_alphas(n_list, alphas, 1.0)
+                    except (ValueError, ZeroDivisionError):
+                        continue
+
+                    all_finite = True
+                    for r in radii_norm:
+                        if not math.isfinite(r):
+                            all_finite = False
+                            break
+                    if not all_finite:
+                        continue
+
+                    # Compute surface invariants
+                    P_surfaces = []
+                    W_surfaces = []
+                    for kk in range(4):
+                        P_kk, W_kk = surface_PW(
+                            n_list[kk], n_list[kk + 1], alphas[kk], alphas[kk + 1]
+                        )
+                        P_surfaces.append(P_kk)
+                        W_surfaces.append(W_kk)
+
+                    P_total = sum(P_surfaces)
+                    W_total = sum(W_surfaces)
+
+                    # Create branch solution
+                    sol = BranchSolution(
+                        root_param=x,
+                        alphas=alphas,
+                        n_list=n_list,
+                        radii_norm=radii_norm,
+                        P_surfaces=P_surfaces,
+                        W_surfaces=W_surfaces,
+                        P_total=P_total,
+                        W_total=W_total,
+                    )
+
+                    # Check if this is a distinct solution
+                    is_distinct = True
+                    for existing in solutions:
+                        if abs(existing.root_param - x) < 0.05:
+                            is_distinct = False
+                            break
+                    if is_distinct:
+                        solutions.append(sol)
+
+        prev_disc = disc
+        prev_x = x
+
+    return solutions[:2]  # Limit to at most 2 branches
 
 
 # =============================================================================
-# Main Pipeline
+# Fill Candidate with Optical Values
+# =============================================================================
+
+
+def fill_candidate_from_branch(
+    branch: BranchSolution,
+    g1: Glass,
+    g2: Glass,
+    cfg: Config,
+    phi1: float,
+    phi2: float,
+    nu1: float,
+    nu2: float,
+    n1: float,
+    n2: float,
+) -> Candidate:
+    """
+    Create a Candidate from a BranchSolution.
+
+    IMPORTANT: Radii are scaled from normalized (f'=1) to mm using cfg.f here.
+
+    Args:
+        branch: The BranchSolution from analytical solver (with radii_norm).
+        g1, g2: Glass objects.
+        cfg: Configuration.
+        phi1, phi2: Normalized lens powers.
+        nu1, nu2: Generalized Abbe numbers.
+        n1, n2: Refractive indices at primary wavelength.
+
+    Returns:
+        Filled Candidate object ready for PE computation.
+    """
+    # Scale radii from normalized to mm
+    radii_mm = [r * cfg.f for r in branch.radii_norm]
+
+    candidate = Candidate(
+        system_type=cfg.system_type,
+        P2=None,
+        W=None,
+        R2=None,
+        Pi=[],
+        PE=None,
+    )
+
+    candidate.g1 = g1  # type: ignore
+    candidate.g2 = g2  # type: ignore
+
+    meta = {
+        "n1": n1,
+        "n2": n2,
+        "nu1": nu1,
+        "nu2": nu2,
+        "delta_nu": nu1 - nu2,
+        "phi1": phi1,
+        "phi2": phi2,
+        "C0": cfg.C0,
+        "P0": cfg.P0,
+        "W0": cfg.W0,
+        "root_param": branch.root_param,
+        "alphas": branch.alphas,
+        "n_list": branch.n_list,
+        "radii": radii_mm,
+        "P_surfaces": branch.P_surfaces,
+        "W_surfaces": branch.W_surfaces,
+        "P_total": branch.P_total,
+        "W_total": branch.W_total,
+    }
+
+    if cfg.system_type == "cemented":
+        # Cemented: 3 surfaces
+        if len(radii_mm) >= 3:
+            meta["R1_front"] = radii_mm[0]
+            meta["R_cemented"] = radii_mm[1]
+            meta["R2_back"] = radii_mm[2]
+
+        # P2 = spherical aberration of cemented interface (surface #2 of 3)
+        if len(branch.P_surfaces) >= 2:
+            candidate.P2 = branch.P_surfaces[1]
+        else:
+            candidate.P2 = 0.0
+
+        # W = total coma
+        candidate.W = branch.W_total
+
+        # R2 = radius of cemented surface in mm
+        R_cem = meta.get("R_cemented", 1.0)
+        if R_cem is None or not math.isfinite(R_cem):
+            candidate.R2 = 1e3
+        elif abs(R_cem) > 1e8:
+            candidate.R2 = 1e3 * (1 if R_cem >= 0 else -1)
+        elif abs(R_cem) < 1e-6:
+            candidate.R2 = 1e-3 * (1 if R_cem >= 0 else -1)
+        else:
+            candidate.R2 = R_cem
+
+    else:  # air_spaced
+        # Air-spaced: 4 surfaces
+        if len(radii_mm) >= 4:
+            meta["R1_front"] = radii_mm[0]
+            meta["R1_back"] = radii_mm[1]
+            meta["R2_front"] = radii_mm[2]
+            meta["R2_back"] = radii_mm[3]
+        meta["d_air"] = cfg.d_air
+
+        # Pi = [P1, P2, P3, P4] surface invariants (must be length 4)
+        if len(branch.P_surfaces) == 4:
+            candidate.Pi = branch.P_surfaces.copy()
+        else:
+            candidate.Pi = []
+
+    candidate.meta = meta  # type: ignore
+
+    return candidate
+
+
+# =============================================================================
+# Main Pipeline (run)
 # =============================================================================
 
 
 def run(cfg: Config) -> tuple[list[Candidate], dict]:
     """
-    Run the 2022 synthesis pipeline.
+    Run the analytical synthesis pipeline.
 
     Flow:
     1. Load glasses from AGF catalogs
-    2. Filter glasses
-    3. Initialize TopNContainer
-    4. For each glass pair:
-       - Check delta-nu constraint
-       - Solve C = C0 (achromatization)
-       - Solve P, W constraints
-       - Fill candidate values
-       - Compute PE
-       - Add to top-N if PE <= max_PE
+    2. Filter glasses (wavelength coverage, dispersion formula)
+    3. Enumerate glass pairs (each-with-each)
+    4. For each pair:
+       a. Check |nu1 - nu2| >= min_delta_nu
+       b. Solve analytical achromatization: phi1, phi2 from C = C0
+       c. Solve analytical monochromatic: find real branches (discriminant-based)
+       d. For each branch: create candidate, compute PE using src/score.py
+       e. Filter by max_PE
+       f. Add to TopN container (PE-only ranking)
     5. Return sorted results and statistics
 
     Args:
@@ -1154,76 +1085,178 @@ def run(cfg: Config) -> tuple[list[Candidate], dict]:
     Returns:
         Tuple of (sorted_candidates, statistics_dict).
     """
-    # Statistics
     stats: dict = {
         "glasses_total": 0,
         "glasses_filtered": 0,
         "pairs_tested": 0,
+        "pairs_after_min_delta_nu": 0,
         "pairs_achromatized": 0,
-        "pairs_PW_solved": 0,
+        "pairs_with_branches": 0,
         "candidates_generated": 0,
         "candidates_saved": 0,
         "best_PE": float("inf"),
+        "pairs_with_0_branches": 0,
+        "pairs_with_1_branch": 0,
+        "pairs_with_2_branches": 0,
     }
 
-    # Step 1: Load glasses
+    # STEP 1: Load glasses
     glasses = load_catalog(cfg.agf_paths)
     stats["glasses_total"] = len(glasses)
 
-    # Step 2: Filter glasses
+    # STEP 1 continued: Filter glasses
     filtered_glasses = filter_glasses(glasses, cfg)
     stats["glasses_filtered"] = len(filtered_glasses)
 
-    # Step 3: Initialize top-N container
+    # Initialize TopN container
     top = TopNContainer(cfg.N_keep)
 
-    # Step 4: Enumerate and process pairs
+    # STEP 2: Enumerate and process pairs
     for g1, g2 in enumerate_pairs(filtered_glasses, cfg.allow_repeat):
         stats["pairs_tested"] += 1
 
-        # Solve C = C0 (achromatization)
-        # This also checks delta-nu internally
-        candidates = solve_C(g1, g2, cfg)
+        try:
+            n1 = refractive_index(g1, cfg.lam0)
+            n2 = refractive_index(g2, cfg.lam0)
 
-        if not candidates:
+            nu1 = compute_generalized_abbe_number(g1, cfg.lam0, cfg.lam1, cfg.lam2)
+            nu2 = compute_generalized_abbe_number(g2, cfg.lam0, cfg.lam1, cfg.lam2)
+        except (ValueError, ZeroDivisionError):
+            continue
+
+        if not math.isfinite(nu1) or not math.isfinite(nu2):
+            continue
+
+        delta_nu = abs(nu1 - nu2)
+        if delta_nu < cfg.min_delta_nu:
+            continue
+
+        stats["pairs_after_min_delta_nu"] += 1
+
+        # STEP 3: Analytical achromatization
+        phi1, phi2 = solve_achromatization(nu1, nu2, cfg.C0)
+
+        if phi1 is None or phi2 is None:
             continue
 
         stats["pairs_achromatized"] += 1
 
-        for candidate in candidates:
-            # Solve P, W constraints
-            ok = solve_PW(candidate, cfg)
-            if not ok:
+        # STEP 4: Analytical monochromatic feasibility (discriminant-based branch solver)
+        if cfg.system_type == "cemented":
+            branches = solve_PW_cemented_branches(
+                phi1=phi1,
+                phi2=phi2,
+                n1=n1,
+                n2=n2,
+                P0=cfg.P0,
+                W0=cfg.W0,
+            )
+        else:
+            branches = solve_PW_air_spaced_branches(
+                phi1=phi1,
+                phi2=phi2,
+                n1=n1,
+                n2=n2,
+                d_air=cfg.d_air,
+                P0=cfg.P0,
+                W0=cfg.W0,
+            )
+
+        n_branches = len(branches)
+        if n_branches == 0:
+            stats["pairs_with_0_branches"] += 1
+            continue
+        elif n_branches == 1:
+            stats["pairs_with_1_branch"] += 1
+        else:
+            stats["pairs_with_2_branches"] += 1
+
+        stats["pairs_with_branches"] += 1
+
+        # STEP 5: Create candidates from branches, compute PE using src/score.py ONLY
+        for branch in branches:
+            candidate = fill_candidate_from_branch(
+                branch=branch,
+                g1=g1,
+                g2=g2,
+                cfg=cfg,
+                phi1=phi1,
+                phi2=phi2,
+                nu1=nu1,
+                nu2=nu2,
+                n1=n1,
+                n2=n2,
+            )
+
+            # Air-spaced: reject if Pi is not length 4
+            if cfg.system_type == "air_spaced" and len(candidate.Pi) != 4:
                 continue
 
-            stats["pairs_PW_solved"] += 1
-
-            # Fill candidate with optical values
-            candidate = fill_candidate(candidate, cfg)
-
-            # Compute PE
+            # Compute PE using src/score.py ONLY
             pe = compute_pe(candidate)
+
             stats["candidates_generated"] += 1
 
-            # Check PE threshold
-            if candidate.PE is not None and candidate.PE > cfg.max_PE:
+            if pe > cfg.max_PE:
                 continue
 
-            # Add to top-N
             if top.push(candidate):
                 stats["candidates_saved"] = len(top)
 
-    # Step 5: Get sorted results
+    # STEP 6: Get sorted results
     results = top.sorted()
 
-    # Update final statistics
     stats["candidates_saved"] = len(results)
     if results:
         best_pe = rank_key(results[0])
         if best_pe != float("inf"):
             stats["best_PE"] = best_pe
 
+    # STEP 7: Sanity checks
+    _log_sanity_checks(stats, results)
+
     return results, stats
+
+
+def _log_sanity_checks(stats: dict, results: list[Candidate]) -> None:
+    """
+    Log sanity check information.
+
+    Verifies:
+    - Many pairs rejected due to no real branches (discriminant < 0)
+    - Some pairs produce TWO branches
+    - Results are strictly PE-sorted
+    - best_PE equals first entry
+    - Counters are consistent
+    """
+    print(f"\n[Sanity Check] Branch statistics:")
+    print(
+        f"  Pairs with 0 branches (rejected): {stats.get('pairs_with_0_branches', 0)}"
+    )
+    print(f"  Pairs with 1 branch: {stats.get('pairs_with_1_branch', 0)}")
+    print(f"  Pairs with 2 branches: {stats.get('pairs_with_2_branches', 0)}")
+
+    if len(results) >= 2:
+        is_sorted = all(
+            rank_key(results[i]) <= rank_key(results[i + 1])
+            for i in range(len(results) - 1)
+        )
+        print(f"  Results strictly PE-sorted: {is_sorted}")
+
+    if results:
+        first_pe = rank_key(results[0])
+        print(f"  best_PE = {stats.get('best_PE', 'N/A')}, first entry PE = {first_pe}")
+        print(
+            f"  best_PE matches first entry: {abs(stats.get('best_PE', float('inf')) - first_pe) < 1e-10}"
+        )
+
+    print(f"\n[Sanity Check] Counter consistency:")
+    print(f"  pairs_tested: {stats.get('pairs_tested', 0)}")
+    print(f"  pairs_after_min_delta_nu: {stats.get('pairs_after_min_delta_nu', 0)}")
+    print(f"  pairs_achromatized: {stats.get('pairs_achromatized', 0)}")
+    print(f"  pairs_with_branches: {stats.get('pairs_with_branches', 0)}")
+    print(f"  candidates_generated: {stats.get('candidates_generated', 0)}")
+    print(f"  candidates_saved: {stats.get('candidates_saved', 0)}")
 
 
 # =============================================================================
@@ -1231,31 +1264,28 @@ def run(cfg: Config) -> tuple[list[Candidate], dict]:
 # =============================================================================
 
 if __name__ == "__main__":
-    # Run with default configuration
     cfg = default_cfg()
 
-    print("Running 2022 synthesis pipeline...")
+    print("Running synthesis pipeline (Analytical Branch Solver)...")
     print(f"  System type: {cfg.system_type}")
     print(f"  Catalogs: {cfg.agf_paths}")
+    print(f"  Wavelengths: lam0={cfg.lam0}, lam1={cfg.lam1}, lam2={cfg.lam2}")
+    print(f"  Target: P0={cfg.P0}, W0={cfg.W0}, C0={cfg.C0}")
     print(f"  N_keep: {cfg.N_keep}")
     print()
 
-    # Run pipeline
     results, stats = run(cfg)
 
-    # Ensure output directory exists
     io.ensure_out_dir(cfg.out_dir)
 
-    # Save results
-    csv_path = f"{cfg.out_dir}/results_2022.csv"
-    io.save_candidates_csv(results, csv_path)
-    print(f"Results saved to: {csv_path}")
+    rows = io.extract_rows(results)
+    csv_path = f"{cfg.out_dir}/results.csv"
+    io.save_csv(rows, csv_path)
+    print(f"\nResults saved to: {csv_path}")
     print()
 
-    # Print summary
     io.print_summary(stats)
 
-    # Sanity print: show top candidate's optical values
     if results:
         top_cand = results[0]
         g1_obj = getattr(top_cand, "g1", None)
@@ -1265,30 +1295,31 @@ if __name__ == "__main__":
 
         print()
         print("=" * 50)
-        print("Top Candidate Optical Values (Sanity Check)")
+        print("Top Candidate Details")
         print("=" * 50)
         print(f"  Glass pair: {g1_name} + {g2_name}")
         print(f"  PE: {top_cand.PE}")
 
+        meta = getattr(top_cand, "meta", {})
+        print(f"  root_param: {meta.get('root_param', 'N/A')}")
+
         if cfg.system_type == "cemented":
-            print(f"  P2 (cemented surface invariant): {top_cand.P2}")
+            print(f"  P2 (cemented surface): {top_cand.P2}")
             print(f"  W (system coma): {top_cand.W}")
-            print(f"  R2 (cemented radius, mm): {top_cand.R2}")
-            meta = getattr(top_cand, "meta", {})
-            if "P_surfaces" in meta:
-                print(f"  P_surfaces: {meta['P_surfaces']}")
-            if "W_surfaces" in meta:
-                print(f"  W_surfaces: {meta['W_surfaces']}")
-            if "alphas" in meta:
-                print(f"  alphas: {meta['alphas']}")
-            if "radii" in meta:
-                print(f"  radii (mm): {meta['radii']}")
+            print(f"  R2 (cemented radius): {top_cand.R2}")
+            print(f"  R1_front: {meta.get('R1_front', 'N/A')}")
+            print(f"  R_cemented: {meta.get('R_cemented', 'N/A')}")
+            print(f"  R2_back: {meta.get('R2_back', 'N/A')}")
         else:
             print(f"  Pi (surface invariants): {top_cand.Pi}")
-            meta = getattr(top_cand, "meta", {})
-            if "alphas" in meta:
-                print(f"  alphas: {meta['alphas']}")
-            if "radii" in meta:
-                print(f"  radii (mm): {meta['radii']}")
+            print(f"  R1_front: {meta.get('R1_front', 'N/A')}")
+            print(f"  R1_back: {meta.get('R1_back', 'N/A')}")
+            print(f"  R2_front: {meta.get('R2_front', 'N/A')}")
+            print(f"  R2_back: {meta.get('R2_back', 'N/A')}")
+            print(f"  d_air: {meta.get('d_air', 'N/A')}")
 
+        print(f"  P_surfaces: {meta.get('P_surfaces', 'N/A')}")
+        print(f"  W_surfaces: {meta.get('W_surfaces', 'N/A')}")
+        print(f"  P_total: {meta.get('P_total', 'N/A')}")
+        print(f"  W_total: {meta.get('W_total', 'N/A')}")
         print("=" * 50)

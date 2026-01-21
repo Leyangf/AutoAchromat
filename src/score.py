@@ -3,6 +3,19 @@ Preliminary Evaluation (PE) scoring module for AUTOACHROMAT.
 
 This module implements the 2022 paper's PE metric for ranking achromat candidates.
 At this stage, ranking and Top-N selection depend ONLY on PE.
+
+PE Formulas (Nguyen & Bakholdin 2022 - kept EXACTLY as defined):
+    Cemented doublets:  PE = |P2| * (3 ** |W|) / (R2 ** 2)
+    Air-spaced doublets: PE = mean(|Pi|)
+
+Where:
+    P2 = Spherical aberration surface invariant of the CEMENTED interface
+    W  = Total system coma (sum of W1 + W2 + W3 from all surfaces)
+    R2 = Radius of the cemented surface
+    Pi = [P1, P2, P3, P4] spherical aberration surface invariants (air-spaced)
+
+Surface invariants are computed using the ITMO alpha-parameter method
+(Ivanova et al. 2017), NOT from shape factor X polynomials.
 """
 
 from __future__ import annotations
@@ -18,11 +31,11 @@ class Candidate:
 
     Attributes:
         system_type: "cemented" or "air_spaced"
-        P2: Spherical aberration of cemented surface (cemented only)
-        W: Coma coefficient (cemented only)
-        R2: Radius of cemented surface (cemented only)
-        Pi: Spherical aberration coefficients of all surfaces (air-spaced only)
-        PE: Preliminary Evaluation score (computed)
+        P2: Spherical aberration surface invariant of cemented interface (cemented only)
+        W: Total coma, sum of surface invariants W1+W2+W3 (cemented only)
+        R2: Radius of cemented surface in mm (cemented only)
+        Pi: Spherical aberration surface invariants [P1,P2,P3,P4] (air-spaced only)
+        PE: Preliminary Evaluation score (computed, used as ONLY ranking key)
     """
 
     system_type: str
@@ -77,7 +90,8 @@ def compute_pe(candidate: Candidate) -> float:
             return math.inf
 
         try:
-            pe = sum(abs(p) for p in candidate.Pi) / len(candidate.Pi)
+            # PE = (1/4) * sum(|Pi|) for air-spaced doublet (4 surfaces)
+            pe = sum(abs(p) for p in candidate.Pi) / 4.0
         except (TypeError, ValueError):
             candidate.PE = math.inf
             return math.inf

@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QSpinBox,
     QDoubleSpinBox,
-    QCheckBox,
     QPushButton,
     QFileDialog,
     QTableWidget,
@@ -107,7 +106,6 @@ class MainWindow(QWidget):
         self.lam2 = self._make_double_box(0.1, 2.0, 6)
         self.min_delta_nu = self._make_double_box(0.0, 1e6, 4)
         self.max_PE = QLineEdit()
-        self.allow_repeat = QCheckBox("Allow repeat glass")
         self.d_air = self._make_double_box(0.0, 1e6, 3)
 
         right_form.addRow("lam0 [um]", self.lam0)
@@ -115,7 +113,6 @@ class MainWindow(QWidget):
         right_form.addRow("lam2 [um]", self.lam2)
         right_form.addRow("min_delta_nu", self.min_delta_nu)
         right_form.addRow("max_PE", self.max_PE)
-        right_form.addRow("", self.allow_repeat)
         right_form.addRow("d_air [mm]", self.d_air)
 
         # Real-ray aberration parameters
@@ -204,7 +201,6 @@ class MainWindow(QWidget):
         self.lam2.setValue(cfg.lam2)
         self.min_delta_nu.setValue(cfg.min_delta_nu)
         self.max_PE.setText(str(cfg.max_PE))
-        self.allow_repeat.setChecked(cfg.allow_repeat)
         self.d_air.setValue(cfg.d_air)
         self.crown_thickness.setValue(cfg.crown_lens_thickness_mm)
         self.flint_thickness.setValue(cfg.flint_lens_thickness_mm)
@@ -298,8 +294,6 @@ class MainWindow(QWidget):
             self.min_delta_nu.setValue(float(config["min_delta_nu"]))
         if "max_PE" in config and config["max_PE"] is not None:
             self.max_PE.setText(str(config["max_PE"]))
-        if "allow_repeat" in config and config["allow_repeat"] is not None:
-            self.allow_repeat.setChecked(bool(config["allow_repeat"]))
         if "d_air" in config and config["d_air"] is not None:
             self.d_air.setValue(float(config["d_air"]))
         if (
@@ -351,7 +345,6 @@ class MainWindow(QWidget):
             lam2=self.lam2.value(),
             min_delta_nu=self.min_delta_nu.value(),
             max_PE=max_pe_value,
-            allow_repeat=self.allow_repeat.isChecked(),
             d_air=self.d_air.value(),
             crown_lens_thickness_mm=self.crown_thickness.value(),
             flint_lens_thickness_mm=self.flint_thickness.value(),

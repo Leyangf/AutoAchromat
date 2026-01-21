@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 # =============================================================================
 
 # Column definitions: (key, header, width, is_float)
+# Updated for analytical branch solver (removed Q-scan)
 COLUMNS = [
     ("rank", "Rank", 5, False),
     ("system_type", "Type", 10, False),
@@ -46,13 +47,15 @@ COLUMNS = [
     ("nu1", "nu1", 8, True),
     ("nu2", "nu2", 8, True),
     ("delta_nu", "d_nu", 8, True),
-    ("X1", "X1", 10, True),
-    ("X2", "X2", 10, True),
+    ("root_param", "root", 10, True),  # Analytical branch parameter
     ("R1_front", "R1f", 10, True),
     ("R1_back", "R1b", 10, True),
     ("R2_front", "R2f", 10, True),
     ("R2_back", "R2b", 10, True),
     ("R_cemented", "R_cem", 10, True),
+    ("d_air", "d_air", 8, True),
+    ("P_total", "P_tot", 10, True),
+    ("W_total", "W_tot", 10, True),
     ("P2", "P2", 12, True),
     ("W", "W", 10, True),
     ("R2", "R2", 10, True),
@@ -161,6 +164,8 @@ def extract_candidate_row(candidate: Any, rank: int) -> dict[str, Any]:
     """
     Extract all relevant fields from a candidate into a dict.
 
+    Updated for analytical branch solver.
+
     Args:
         candidate: Candidate object from synthesis pipeline.
         rank: Ranking position (1-based).
@@ -197,8 +202,13 @@ def extract_candidate_row(candidate: Any, rank: int) -> dict[str, Any]:
     nu1 = meta.get("nu1")
     nu2 = meta.get("nu2")
     delta_nu = meta.get("delta_nu")
-    X1 = meta.get("X1")
-    X2 = meta.get("X2")
+
+    # Analytical branch parameter
+    root_param = meta.get("root_param")
+
+    # P and W totals
+    P_total = meta.get("P_total")
+    W_total = meta.get("W_total")
 
     # Radii from meta
     R1_front = meta.get("R1_front")
@@ -206,6 +216,7 @@ def extract_candidate_row(candidate: Any, rank: int) -> dict[str, Any]:
     R2_front = meta.get("R2_front")
     R2_back = meta.get("R2_back")
     R_cemented = meta.get("R_cemented")
+    d_air = meta.get("d_air")
 
     # Candidate direct fields
     P2 = candidate.P2
@@ -233,13 +244,15 @@ def extract_candidate_row(candidate: Any, rank: int) -> dict[str, Any]:
         "nu1": nu1,
         "nu2": nu2,
         "delta_nu": delta_nu,
-        "X1": X1,
-        "X2": X2,
+        "root_param": root_param,
         "R1_front": R1_front,
         "R1_back": R1_back,
         "R2_front": R2_front,
         "R2_back": R2_back,
         "R_cemented": R_cemented,
+        "d_air": d_air,
+        "P_total": P_total,
+        "W_total": W_total,
         "P2": P2,
         "W": W,
         "R2": R2,
@@ -454,7 +467,6 @@ def save_report_md(
     lines.append(f"- **lam2**: {cfg.lam2}")
     lines.append(f"- **min_delta_nu**: {cfg.min_delta_nu}")
     lines.append(f"- **max_PE**: {cfg.max_PE}")
-    lines.append(f"- **allow_repeat**: {cfg.allow_repeat}")
     if cfg.system_type == "air_spaced":
         lines.append(f"- **d_air**: {cfg.d_air}")
     lines.append(f"- **crown_lens_thickness_mm**: {cfg.crown_lens_thickness_mm}")
@@ -553,7 +565,6 @@ def save_resolved_config(cfg: "Config", display: int, out_path: str) -> None:
         "lam2": cfg.lam2,
         "min_delta_nu": cfg.min_delta_nu,
         "max_PE": cfg.max_PE,
-        "allow_repeat": cfg.allow_repeat,
         "d_air": cfg.d_air,
         "crown_lens_thickness_mm": cfg.crown_lens_thickness_mm,
         "flint_lens_thickness_mm": cfg.flint_lens_thickness_mm,

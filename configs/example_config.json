@@ -4,7 +4,7 @@
         "glass_database/OHARA.agf",
         "glass_database/CDGM.AGF"
     ],
-    "system_type": "air_spaced",
+    "system_type": "cemented",
     "N_keep": 100,
     "f": 100.0,
     "D": 20.0,
@@ -16,7 +16,6 @@
     "lam2": 0.65627,
     "min_delta_nu": 10.0,
     "max_PE": 0.01,
-    "allow_repeat": false,
     "d_air": 5.0,
     "crown_lens_thickness_mm": 5.0,
     "flint_lens_thickness_mm": 3.0,

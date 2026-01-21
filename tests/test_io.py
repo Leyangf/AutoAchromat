@@ -38,17 +38,23 @@ c1.meta = {
     "nu1": 60,
     "nu2": 30,
     "delta_nu": 30,
+    "root_param": 0.5,  # Analytical branch parameter
+    "P_total": 0.001,
+    "W_total": 0.05,
+    "R1_front": 100.0,
+    "R_cemented": 50.0,
+    "R2_back": -80.0,
 }
 
 c2: Any = Candidate("cemented", P2=0.002, W=0.03, R2=40.0, PE=0.02)
 c2.g1 = g1
 c2.g2 = g3  # g3 has no cost
-c2.meta = {}
+c2.meta = {"root_param": 0.6, "P_total": 0.002, "W_total": 0.03}
 
-c3: Any = Candidate("air_spaced", Pi=[0.1, 0.2, 0.15, 0.12], PE=0.15)
+c3: Any = Candidate("air_spaced", Pi=[0.1, 0.2, 0.15, 0.12], PE=0.1425)
 c3.g1 = g3
 c3.g2 = g2
-c3.meta = {}
+c3.meta = {"root_param": 0.7, "P_total": 0.57, "W_total": 0.2, "d_air": 5.0}
 
 # Test ensure_out_dir
 print("Testing ensure_out_dir...")

@@ -130,22 +130,6 @@ Examples:
         help="Maximum PE threshold (default: 1e10)",
     )
 
-    # allow_repeat: use mutually exclusive group for --allow_repeat / --no_allow_repeat
-    repeat_group = parser.add_mutually_exclusive_group()
-    repeat_group.add_argument(
-        "--allow_repeat",
-        action="store_true",
-        dest="allow_repeat",
-        default=None,
-        help="Allow same glass for both elements",
-    )
-    repeat_group.add_argument(
-        "--no_allow_repeat",
-        action="store_false",
-        dest="allow_repeat",
-        help="Disallow same glass for both elements (default)",
-    )
-
     # Air-spaced specific (default None)
     parser.add_argument(
         "--d_air",
@@ -266,8 +250,6 @@ def _apply_config_to_cfg(cfg: "Config", config: dict[str, Any]) -> int | None:
         cfg.min_delta_nu = float(config["min_delta_nu"])
     if "max_PE" in config and config["max_PE"] is not None:
         cfg.max_PE = float(config["max_PE"])
-    if "allow_repeat" in config and config["allow_repeat"] is not None:
-        cfg.allow_repeat = bool(config["allow_repeat"])
     if "d_air" in config and config["d_air"] is not None:
         cfg.d_air = float(config["d_air"])
     if (
@@ -331,8 +313,6 @@ def _apply_cli_overrides(cfg: "Config", args: argparse.Namespace) -> None:
         cfg.min_delta_nu = args.min_delta_nu
     if args.max_PE is not None:
         cfg.max_PE = args.max_PE
-    if args.allow_repeat is not None:
-        cfg.allow_repeat = args.allow_repeat
     if args.d_air is not None:
         cfg.d_air = args.d_air
     if args.crown_lens_thickness_mm is not None:
@@ -469,7 +449,6 @@ def print_config_summary(
     print(f"  Wavelengths:    {cfg.lam0}, {cfg.lam1}, {cfg.lam2} um")
     print(f"  min_delta_nu:   {cfg.min_delta_nu}")
     print(f"  max_PE:         {cfg.max_PE}")
-    print(f"  allow_repeat:   {cfg.allow_repeat}")
     if cfg.system_type == "air_spaced":
         print(f"  d_air:          {cfg.d_air} mm")
     print(f"  Crown thickness: {cfg.crown_lens_thickness_mm} mm")
