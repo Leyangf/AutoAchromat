@@ -29,32 +29,24 @@ def load_inputs(path: str) -> tuple[Inputs, list[str]]:
         eps=d.get("eps", 1e-12),
         root_imag_tol=d.get("root_imag_tol", 1e-9),
     )
-    catalog_paths: list[str] = d.get("catalogs", [])
+    catalog_paths = d.get("catalogs")
+    if not isinstance(catalog_paths, list) or not catalog_paths:
+        raise ValueError(
+            "Config must include a non-empty 'catalogs' list with AGF paths."
+        )
     return inputs, catalog_paths
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="JSON config path")
-    ap.add_argument(
-        "--catalog",
-        nargs="+",
-        default=None,
-        help="AGF catalog paths (overrides 'catalogs' in JSON)",
-    )
     ap.add_argument("--out", default="", help="Optional output json path")
     args = ap.parse_args()
 
-    inputs, catalog_paths = load_inputs(args.config)
-
-    # --catalog CLI flag takes priority; otherwise use JSON 'catalogs'
-    if args.catalog:
-        catalog_paths = args.catalog
-    if not catalog_paths:
-        ap.error(
-            "No catalog paths provided. Set 'catalogs' in the JSON config "
-            "or pass --catalog on the command line."
-        )
+    try:
+        inputs, catalog_paths = load_inputs(args.config)
+    except ValueError as e:
+        ap.error(str(e))
 
     # Resolve paths relative to the config file directory
     config_dir = Path(args.config).resolve().parent
