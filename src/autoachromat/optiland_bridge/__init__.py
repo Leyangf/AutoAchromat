@@ -6,11 +6,12 @@ Stage A: placeholder thicknesses  (fast, 100 % trace success)
 Stage B: thickened prescription   (future)
 """
 
-from .builder import build_optic
+from .builder import build_optic, build_optic_from_prescription
 from .evaluator import evaluate, batch_evaluate
 
 __all__ = [
     "build_optic",
+    "build_optic_from_prescription",
     "evaluate",
     "batch_evaluate",
 ]

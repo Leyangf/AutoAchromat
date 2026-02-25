@@ -71,3 +71,36 @@ class Candidate:
     cost2: Optional[float] = None
 
     notes: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Thick-lens prescription  (output of thickening, input to builder)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ElementRx:
+    """Thick-lens prescription for a single element."""
+
+    R_front: float  # corrected front radius [mm]
+    R_back: float  # corrected back radius [mm]
+    t_center: float  # center thickness [mm]
+    t_edge: float  # edge thickness [mm]
+    nd: float  # refractive index at design wavelength
+    vd: float  # Abbe number
+
+
+@dataclass
+class ThickPrescription:
+    """Complete thick-lens prescription for a doublet.
+
+    Produced by ``thickening.thicken()`` and consumed by
+    ``optiland_bridge.builder.build_optic()``.
+    """
+
+    system_type: SystemType  # "cemented" | "spaced"
+    elements: list[ElementRx]  # always 2 elements
+    air_gap: float | None  # spaced doublet only (mm)
+    back_focus_guess: float  # initial back focal distance for image_solve [mm]
+    D: float  # entrance pupil diameter [mm]
+    wavelengths: tuple[float, float, float]  # (lam1, lam0, lam2) [µm]

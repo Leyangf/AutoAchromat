@@ -13,5 +13,5 @@
     "min_delta_nu": 10,
     "max_PE": 100,
     "N": 20,
-    "system_type": "spaced"
+    "system_type": "cemented"
 }
