@@ -16,21 +16,20 @@ import sys
 import time
 from pathlib import Path
 
-# Ensure the src directory is importable when running as a script
-_src = str(Path(__file__).resolve().parents[2])
-if _src not in sys.path:
-    sys.path.insert(0, _src)
-
 from autoachromat.cli import load_inputs
 from autoachromat.glass_reader import load_catalog
 from autoachromat.cemented import run_cemented
 from autoachromat.spaced import run_spaced
 from autoachromat.optiland_bridge.builder import build_optic
 from autoachromat.optiland_bridge.evaluator import (
-    evaluate,
     batch_evaluate,
     OpticMetrics,
 )
+
+# Ensure the src directory is importable when running as a script
+_src = str(Path(__file__).resolve().parents[2])
+if _src not in sys.path:
+    sys.path.insert(0, _src)
 
 
 def _fmt(v, fmt=".4g") -> str:

@@ -1,8 +1,10 @@
 """
-builder.py – Construct an optiland ``Optic`` from a thin-lens ``Candidate``.
+builder.py – Construct an optiland ``Optic`` from a ``ThickPrescription``.
 
-Stage A  (current):  placeholder thicknesses, fast trace.
-Stage B  (future) :  physically thickened prescription (same interface).
+This module is the thin adapter between the pure-math ``thickening`` module
+and the optiland ray-tracing library.  It contains **no** optical design
+logic – only the translation of a ``ThickPrescription`` into optiland API
+calls.
 """
 
 from __future__ import annotations
@@ -14,68 +16,10 @@ from typing import Optional
 from optiland import optic
 from optiland.materials import AbbeMaterial
 
-from ..models import Candidate, Inputs
+from ..models import Candidate, Inputs, ThickPrescription
+from ..thickening import thicken
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Thickness helpers
-# ---------------------------------------------------------------------------
-
-_MIN_CENTER = 2.0  # mm – absolute minimum centre thickness
-_MIN_EDGE = 0.5  # mm – absolute minimum edge thickness
-
-
-def _sag(R: float, h: float) -> float:
-    """Signed sagitta of a sphere of radius *R* at height *h*.
-
-    Returns the z-offset of the surface at height *h* relative to the
-    vertex (z = 0).  Positive for R > 0, negative for R < 0.
-    If |R| < h the surface cannot accommodate the aperture; returns the
-    full sag (R itself) as a fallback.
-    """
-    if not math.isfinite(R) or abs(R) < 1e-12:
-        return 0.0
-    if abs(R) < h:
-        # Surface too curved – can't even reach this height; return max sag
-        return R  # sign preserving; caller will get a large thickness
-    return R - math.copysign(math.sqrt(R * R - h * h), R)
-
-
-def _element_center_thickness(R_front: float, R_back: float, h: float) -> float:
-    """Minimum safe centre thickness for a single lens element.
-
-    Ensures both positive centre *and* positive edge thickness, with
-    margins ``_MIN_CENTER`` and ``_MIN_EDGE``.
-
-    ``h`` is the semi-aperture (D / 2).
-    """
-    sag_f = _sag(R_front, h)  # positive for convex-toward-object
-    sag_b = _sag(R_back, h)  # negative for concave-toward-image
-
-    # Edge thickness = t_center + sag_back - sag_front
-    # We need  t_center >= sag_front - sag_back + _MIN_EDGE
-    t_from_edge = (sag_f - sag_b) + _MIN_EDGE
-
-    return max(t_from_edge, _MIN_CENTER)
-
-
-def _placeholder_air_gap(D: float) -> float:
-    """Air gap between two singlets (spaced doublet only).
-
-    Rule: max(D / 50, 0.5) mm.
-    """
-    return max(D / 50.0, 0.5)
-
-
-def _initial_back_focus(fprime: float) -> float:
-    """Initial guess for the back focal distance before ``image_solve``.
-
-    ``image_solve()`` will correct this, but a reasonable starting value
-    helps avoid occasional tracing failures during the solve.
-    """
-    return abs(fprime) * 0.9
-
 
 # Optiland's ray-surface intersection has a numerical precision issue
 # that causes NaN when radius values carry too many decimal places.
@@ -123,165 +67,158 @@ def build_optic(
     if stage == "B":
         raise NotImplementedError("Stage B (thickened) not yet implemented")
 
-    if candidate.system_type == "cemented":
-        return _build_cemented_a(candidate, inputs)
-    elif candidate.system_type == "spaced":
-        return _build_spaced_a(candidate, inputs)
-    else:
-        logger.warning("Unknown system_type=%s", candidate.system_type)
+    rx = thicken(candidate, inputs)
+    if rx is None:
         return None
+    return _build_from_prescription(rx)
+
+
+def build_optic_from_prescription(
+    rx: ThickPrescription,
+) -> Optional[optic.Optic]:
+    """Build an optiland ``Optic`` directly from a ``ThickPrescription``.
+
+    Useful when the caller has already computed the prescription via
+    ``thickening.thicken()`` and wants to avoid recomputing it.
+    """
+    return _build_from_prescription(rx)
 
 
 # ---------------------------------------------------------------------------
-# Cemented doublet  (3 radii: R1, R2, R3)
-# ---------------------------------------------------------------------------
-#   Surface 0 : Object     (flat, thickness → ∞)
-#   Surface 1 : R1         thickness = t1, material = glass1, aperture stop
-#   Surface 2 : R2         thickness = t2, material = glass2
-#   Surface 3 : R3         thickness = back-focus  (air)
-#   Surface 4 : Image      (flat)
+# Internal: ThickPrescription → optiland Optic
 # ---------------------------------------------------------------------------
 
 
-def _build_cemented_a(cand: Candidate, inp: Inputs) -> Optional[optic.Optic]:
-    R1 = _safe_radius(cand.radii[0])
-    R2 = _safe_radius(cand.radii[1])
-    R3 = _safe_radius(cand.radii[2])
-    h = inp.D / 2.0
-    t1 = _element_center_thickness(R1, R2, h)
-    t2 = _element_center_thickness(R2, R3, h)
-    bf = _initial_back_focus(inp.fprime)
+def _build_from_prescription(
+    rx: ThickPrescription,
+) -> Optional[optic.Optic]:
+    """Translate a ``ThickPrescription`` into an optiland ``Optic``.
 
-    mat1 = AbbeMaterial(cand.n1, cand.nu1)
-    mat2 = AbbeMaterial(cand.n2, cand.nu2)
+    Cemented doublet  (5 surfaces):
+        Object | R1(stop) | R2(cemented) | R3 | Image
 
+    Air-spaced doublet  (6 surfaces):
+        Object | R1(stop) | R2 | R3 | R4 | Image
+    """
     try:
-        op = optic.Optic()
-
-        # Surface 0 – Object (at infinity)
-        op.add_surface(index=0, radius=float("inf"), thickness=1e10)
-
-        # Surface 1 – first element front face (aperture stop)
-        op.add_surface(
-            index=1,
-            radius=R1,
-            thickness=t1,
-            material=mat1,
-            is_stop=True,
-        )
-
-        # Surface 2 – cemented interface
-        op.add_surface(
-            index=2,
-            radius=R2,
-            thickness=t2,
-            material=mat2,
-        )
-
-        # Surface 3 – last surface of the doublet
-        op.add_surface(
-            index=3,
-            radius=R3,
-            thickness=bf,
-        )
-
-        # Surface 4 – Image plane
-        op.add_surface(index=4, radius=float("inf"), thickness=0.0)
-
-        _configure_system(op, inp)
-        return op
-
+        if rx.system_type == "cemented":
+            return _build_cemented(rx)
+        elif rx.system_type == "spaced":
+            return _build_spaced(rx)
+        else:
+            logger.warning("Unknown system_type=%s in prescription", rx.system_type)
+            return None
     except Exception:
         logger.debug(
-            "Failed to build cemented optic for %s:%s + %s:%s",
-            cand.catalog1,
-            cand.glass1,
-            cand.catalog2,
-            cand.glass2,
+            "Failed to build optic from prescription (type=%s)",
+            rx.system_type,
             exc_info=True,
         )
         return None
 
 
-# ---------------------------------------------------------------------------
-# Air-spaced doublet  (4 radii: R1, R2, R3, R4)
-# ---------------------------------------------------------------------------
-#   Surface 0 : Object     (flat, thickness → ∞)
-#   Surface 1 : R1         thickness = t1, material = glass1, aperture stop
-#   Surface 2 : R2         thickness = air_gap  (air)
-#   Surface 3 : R3         thickness = t2, material = glass2
-#   Surface 4 : R4         thickness = back-focus  (air)
-#   Surface 5 : Image      (flat)
-# ---------------------------------------------------------------------------
+def _build_cemented(rx: ThickPrescription) -> optic.Optic:
+    """Build cemented doublet: 5 surfaces."""
+    e1, e2 = rx.elements[0], rx.elements[1]
+
+    R1 = _safe_radius(e1.R_front)
+    R2 = _safe_radius(e1.R_back)  # == e2.R_front (cemented)
+    R3 = _safe_radius(e2.R_back)
+
+    mat1 = AbbeMaterial(e1.nd, e1.vd)
+    mat2 = AbbeMaterial(e2.nd, e2.vd)
+
+    op = optic.Optic()
+
+    # Surface 0 – Object (at infinity)
+    op.add_surface(index=0, radius=float("inf"), thickness=1e10)
+
+    # Surface 1 – first element front face (aperture stop)
+    op.add_surface(
+        index=1,
+        radius=R1,
+        thickness=e1.t_center,
+        material=mat1,
+        is_stop=True,
+    )
+
+    # Surface 2 – cemented interface
+    op.add_surface(
+        index=2,
+        radius=R2,
+        thickness=e2.t_center,
+        material=mat2,
+    )
+
+    # Surface 3 – last surface of the doublet
+    op.add_surface(
+        index=3,
+        radius=R3,
+        thickness=rx.back_focus_guess,
+    )
+
+    # Surface 4 – Image plane
+    op.add_surface(index=4, radius=float("inf"), thickness=0.0)
+
+    _configure_system(op, rx)
+    return op
 
 
-def _build_spaced_a(cand: Candidate, inp: Inputs) -> Optional[optic.Optic]:
-    R1 = _safe_radius(cand.radii[0])
-    R2 = _safe_radius(cand.radii[1])
-    R3 = _safe_radius(cand.radii[2])
-    R4 = _safe_radius(cand.radii[3])
-    h = inp.D / 2.0
-    t1 = _element_center_thickness(R1, R2, h)
-    t2 = _element_center_thickness(R3, R4, h)
-    gap = _placeholder_air_gap(inp.D)
-    bf = _initial_back_focus(inp.fprime)
+def _build_spaced(rx: ThickPrescription) -> optic.Optic:
+    """Build air-spaced doublet: 6 surfaces."""
+    e1, e2 = rx.elements[0], rx.elements[1]
 
-    mat1 = AbbeMaterial(cand.n1, cand.nu1)
-    mat2 = AbbeMaterial(cand.n2, cand.nu2)
+    R1 = _safe_radius(e1.R_front)
+    R2 = _safe_radius(e1.R_back)
+    R3 = _safe_radius(e2.R_front)
+    R4 = _safe_radius(e2.R_back)
 
-    try:
-        op = optic.Optic()
+    mat1 = AbbeMaterial(e1.nd, e1.vd)
+    mat2 = AbbeMaterial(e2.nd, e2.vd)
 
-        # Surface 0 – Object (at infinity)
-        op.add_surface(index=0, radius=float("inf"), thickness=1e10)
+    assert rx.air_gap is not None, "Spaced doublet must have an air_gap"
 
-        # Surface 1 – lens 1 front face (aperture stop)
-        op.add_surface(
-            index=1,
-            radius=R1,
-            thickness=t1,
-            material=mat1,
-            is_stop=True,
-        )
+    op = optic.Optic()
 
-        # Surface 2 – lens 1 rear face → air gap
-        op.add_surface(
-            index=2,
-            radius=R2,
-            thickness=gap,
-        )
+    # Surface 0 – Object (at infinity)
+    op.add_surface(index=0, radius=float("inf"), thickness=1e10)
 
-        # Surface 3 – lens 2 front face
-        op.add_surface(
-            index=3,
-            radius=R3,
-            thickness=t2,
-            material=mat2,
-        )
+    # Surface 1 – lens 1 front face (aperture stop)
+    op.add_surface(
+        index=1,
+        radius=R1,
+        thickness=e1.t_center,
+        material=mat1,
+        is_stop=True,
+    )
 
-        # Surface 4 – lens 2 rear face → back-focus
-        op.add_surface(
-            index=4,
-            radius=R4,
-            thickness=bf,
-        )
+    # Surface 2 – lens 1 rear face → air gap
+    op.add_surface(
+        index=2,
+        radius=R2,
+        thickness=rx.air_gap,
+    )
 
-        # Surface 5 – Image plane
-        op.add_surface(index=5, radius=float("inf"), thickness=0.0)
+    # Surface 3 – lens 2 front face
+    op.add_surface(
+        index=3,
+        radius=R3,
+        thickness=e2.t_center,
+        material=mat2,
+    )
 
-        _configure_system(op, inp)
-        return op
+    # Surface 4 – lens 2 rear face → back-focus
+    op.add_surface(
+        index=4,
+        radius=R4,
+        thickness=rx.back_focus_guess,
+    )
 
-    except Exception:
-        logger.debug(
-            "Failed to build spaced optic for %s:%s + %s:%s",
-            cand.catalog1,
-            cand.glass1,
-            cand.catalog2,
-            cand.glass2,
-            exc_info=True,
-        )
-        return None
+    # Surface 5 – Image plane
+    op.add_surface(index=5, radius=float("inf"), thickness=0.0)
+
+    _configure_system(op, rx)
+    return op
 
 
 # ---------------------------------------------------------------------------
@@ -289,21 +226,22 @@ def _build_spaced_a(cand: Candidate, inp: Inputs) -> Optional[optic.Optic]:
 # ---------------------------------------------------------------------------
 
 
-def _configure_system(op: optic.Optic, inp: Inputs) -> None:
+def _configure_system(op: optic.Optic, rx: ThickPrescription) -> None:
     """Set aperture, field, wavelengths, and run image_solve."""
 
-    # Aperture  –  entrance-pupil diameter = D (from inputs)
-    op.set_aperture(aperture_type="EPD", value=inp.D)
+    # Aperture  –  entrance-pupil diameter = D
+    op.set_aperture(aperture_type="EPD", value=rx.D)
 
     # Field  –  on-axis only for Stage A (fast)
     op.set_field_type(field_type="angle")
     op.add_field(y=0.0)
 
-    # Wavelengths  –  three spectral lines from the synthesis
-    #   lam1 (short), lam0 (centre / primary), lam2 (long)
-    op.add_wavelength(value=inp.lam1)  # short wavelength
-    op.add_wavelength(value=inp.lam0, is_primary=True)  # primary / design
-    op.add_wavelength(value=inp.lam2)  # long wavelength
+    # Wavelengths  –  three spectral lines
+    #   wavelengths = (lam1_short, lam0_primary, lam2_long)
+    lam1, lam0, lam2 = rx.wavelengths
+    op.add_wavelength(value=lam1)  # short wavelength
+    op.add_wavelength(value=lam0, is_primary=True)  # primary / design
+    op.add_wavelength(value=lam2)  # long wavelength
 
     # Move image plane to paraxial focus
     op.image_solve()
