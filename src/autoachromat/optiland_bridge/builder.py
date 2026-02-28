@@ -13,13 +13,77 @@ import math
 import logging
 from typing import Optional
 
+import numpy as np
 from optiland import optic
 from optiland.materials import AbbeMaterial
+from optiland.materials.base import BaseMaterial
 
-from ..models import Candidate, Inputs, ThickPrescription
+from ..models import Candidate, Inputs, ThickPrescription, ElementRx
+from ..optics import refractive_index
+from ..glass_reader import Glass
 from ..thickening import thicken
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Custom material: uses AGF dispersion formula for arbitrary wavelengths
+# ---------------------------------------------------------------------------
+
+
+class AGFMaterial(BaseMaterial):
+    """Material that uses AGF catalog dispersion coefficients.
+
+    Unlike ``AbbeMaterial`` (limited to 0.38–0.75 µm), this class can
+    compute *n(λ)* at any wavelength supported by the dispersion formula,
+    making it suitable for IR / UV designs.
+    """
+
+    def __init__(self, formula_id: int, cd: list[float], name: str = ""):
+        super().__init__()
+        self._formula_id = formula_id
+        self._cd = list(cd)
+        self._glass = Glass(name=name, catalog="", formula_id=formula_id, cd=list(cd))
+
+    def _calculate_n(self, wavelength, **kwargs):
+        """Compute n(λ) using the AGF dispersion formula."""
+        wavelength = np.atleast_1d(np.asarray(wavelength, dtype=float))
+        result = np.array(
+            [refractive_index(self._glass, float(w)) for w in wavelength.ravel()]
+        ).reshape(wavelength.shape)
+        if result.size == 1:
+            return float(result.ravel()[0])
+        return result
+
+    def _calculate_k(self, wavelength, **kwargs):
+        """Extinction coefficient – always 0 for catalog glasses."""
+        return np.zeros_like(np.asarray(wavelength, dtype=float)) * 0.0
+
+    def to_dict(self):
+        d = super().to_dict()
+        d.update(
+            {
+                "formula_id": self._formula_id,
+                "cd": self._cd,
+            }
+        )
+        return d
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(data["formula_id"], data["cd"])
+
+
+def _make_material(elem: ElementRx) -> BaseMaterial:
+    """Create the best available optiland material for an element.
+
+    If AGF dispersion data is present, use ``AGFMaterial`` (works at any
+    wavelength).  Otherwise, fall back to ``AbbeMaterial`` (visible-only).
+    """
+    if elem.formula_id is not None and elem.cd:
+        return AGFMaterial(elem.formula_id, elem.cd)
+    return AbbeMaterial(elem.nd, elem.vd)
+
 
 # Optiland's ray-surface intersection has a numerical precision issue
 # that causes NaN when radius values carry too many decimal places.
@@ -125,13 +189,13 @@ def _build_cemented(rx: ThickPrescription) -> optic.Optic:
     R2 = _safe_radius(e1.R_back)  # == e2.R_front (cemented)
     R3 = _safe_radius(e2.R_back)
 
-    mat1 = AbbeMaterial(e1.nd, e1.vd)
-    mat2 = AbbeMaterial(e2.nd, e2.vd)
+    mat1 = _make_material(e1)
+    mat2 = _make_material(e2)
 
     op = optic.Optic()
 
     # Surface 0 – Object (at infinity)
-    op.add_surface(index=0, radius=float("inf"), thickness=1e10)
+    op.add_surface(index=0, radius=float("inf"), thickness=float("inf"))
 
     # Surface 1 – first element front face (aperture stop)
     op.add_surface(
@@ -173,15 +237,15 @@ def _build_spaced(rx: ThickPrescription) -> optic.Optic:
     R3 = _safe_radius(e2.R_front)
     R4 = _safe_radius(e2.R_back)
 
-    mat1 = AbbeMaterial(e1.nd, e1.vd)
-    mat2 = AbbeMaterial(e2.nd, e2.vd)
+    mat1 = _make_material(e1)
+    mat2 = _make_material(e2)
 
     assert rx.air_gap is not None, "Spaced doublet must have an air_gap"
 
     op = optic.Optic()
 
     # Surface 0 – Object (at infinity)
-    op.add_surface(index=0, radius=float("inf"), thickness=1e10)
+    op.add_surface(index=0, radius=float("inf"), thickness=float("inf"))
 
     # Surface 1 – lens 1 front face (aperture stop)
     op.add_surface(
@@ -232,9 +296,12 @@ def _configure_system(op: optic.Optic, rx: ThickPrescription) -> None:
     # Aperture  –  entrance-pupil diameter = D
     op.set_aperture(aperture_type="EPD", value=rx.D)
 
-    # Field  –  on-axis only for Stage A (fast)
+    # Field  –  on-axis + off-axis for proper Seidel aberration evaluation.
+    # Seidel CC, AC, PC, DC, TchC all depend on chief-ray height, which is
+    # zero for on-axis only, making those aberrations identically 0.
     op.set_field_type(field_type="angle")
     op.add_field(y=0.0)
+    op.add_field(y=1.0)  # 1° off-axis for aberration evaluation
 
     # Wavelengths  –  three spectral lines
     #   wavelengths = (lam1_short, lam0_primary, lam2_long)

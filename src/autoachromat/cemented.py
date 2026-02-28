@@ -1,18 +1,18 @@
 from __future__ import annotations
 
+import logging
 import math
 from typing import List, Tuple
 
 from .glass_reader import Glass
 from .models import Inputs, Candidate
 from .optics import (
-    Config,
-    filter_glasses,
-    refractive_index,
-    compute_abbe_number,
     achromat_power,
     check_min_radius,
+    prepare_glass_data,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _solve_Q_roots(
@@ -90,18 +90,7 @@ def run_cemented(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
       enumerate pairs -> Abbe filter -> achromat power -> solve Q roots
       -> compute W -> radii constraint -> compute PE -> Top-N by |W-W0|
     """
-    cfg = Config(inputs.lam0, inputs.lam1, inputs.lam2)
-    usable = filter_glasses(glasses, cfg)
-
-    # Precompute n(lam0) and nu for each glass
-    gdata = []
-    for g in usable:
-        try:
-            n0 = refractive_index(g, inputs.lam0)
-            nu = compute_abbe_number(g, inputs.lam0, inputs.lam1, inputs.lam2)
-        except Exception:
-            continue
-        gdata.append((g, n0, nu))
+    gdata = prepare_glass_data(glasses, inputs.lam0, inputs.lam1, inputs.lam2)
 
     kept: list[Candidate] = []
 
@@ -116,7 +105,7 @@ def run_cemented(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
 
             try:
                 phi1, phi2 = achromat_power(nu1, nu2, inputs.C0)
-            except Exception:
+            except (ValueError, ZeroDivisionError):
                 continue
 
             for Q in _solve_Q_roots(n1, n2, phi1, phi2, inputs.P0):
@@ -150,8 +139,19 @@ def run_cemented(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
                         PE=PE,
                         cost1=g1.relative_cost,
                         cost2=g2.relative_cost,
+                        formula_id1=g1.formula_id,
+                        cd1=list(g1.cd),
+                        formula_id2=g2.formula_id,
+                        cd2=list(g2.cd),
                     )
-                except Exception:
+                except (ValueError, ZeroDivisionError) as exc:
+                    logger.debug(
+                        "Skipping candidate %s+%s Q=%.4g – %s",
+                        g1.name,
+                        g2.name,
+                        Q,
+                        exc,
+                    )
                     continue
 
                 # Top-N selection: keep smallest |W-W0|

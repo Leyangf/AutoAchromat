@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import List, Tuple
 
 import numpy as np
@@ -7,13 +8,12 @@ import numpy as np
 from .glass_reader import Glass
 from .models import Inputs, Candidate
 from .optics import (
-    Config,
-    filter_glasses,
-    refractive_index,
-    compute_abbe_number,
     achromat_power,
     check_min_radius,
+    prepare_glass_data,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _coeffs(n1: float, n2: float, phi1: float, phi2: float) -> dict:
@@ -143,18 +143,7 @@ def run_spaced(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
     Spaced one-file pipeline:
       enumerate pairs -> achromat -> solve (Q1,Q2) -> radii constraint -> PE -> rank by PE
     """
-    cfg = Config(inputs.lam0, inputs.lam1, inputs.lam2)
-    usable = filter_glasses(glasses, cfg)
-
-    # Precompute n(lam0) and nu for each glass
-    gdata = []
-    for g in usable:
-        try:
-            n0 = refractive_index(g, inputs.lam0)
-            nu = compute_abbe_number(g, inputs.lam0, inputs.lam1, inputs.lam2)
-        except Exception:
-            continue
-        gdata.append((g, n0, nu))
+    gdata = prepare_glass_data(glasses, inputs.lam0, inputs.lam1, inputs.lam2)
 
     out: list[Candidate] = []
 
@@ -172,7 +161,7 @@ def run_spaced(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
                 c = _coeffs(n1, n2, phi1, phi2)
                 Cc = _C_const(n1, n2, phi1, phi2)
                 pairs = _solve_Q_pairs(inputs, c, Cc)
-            except Exception:
+            except (ValueError, ZeroDivisionError):
                 continue
 
             for Q1, Q2 in pairs:
@@ -205,10 +194,22 @@ def run_spaced(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
                             PE=PE,
                             cost1=g1.relative_cost,
                             cost2=g2.relative_cost,
+                            formula_id1=g1.formula_id,
+                            cd1=list(g1.cd),
+                            formula_id2=g2.formula_id,
+                            cd2=list(g2.cd),
                             notes={"C_const_used": Cc},
                         )
                     )
-                except Exception:
+                except (ValueError, ZeroDivisionError) as exc:
+                    logger.debug(
+                        "Skipping candidate %s+%s Q1=%.4g Q2=%.4g – %s",
+                        g1.name,
+                        g2.name,
+                        Q1,
+                        Q2,
+                        exc,
+                    )
                     continue
 
     out.sort(key=lambda c: c.PE if c.PE is not None else float("inf"))

@@ -2,18 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
-from dataclasses import asdict
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
-from .glass_reader import load_catalog
 from .models import Inputs, Candidate
-from .cemented import run_cemented
-from .spaced import run_spaced
-from .thickening import thicken
-from .optiland_bridge.builder import build_optic_from_prescription
-from .optiland_bridge.evaluator import evaluate, OpticMetrics
+from .pipeline import run_design, PipelineResult
+from .optiland_bridge.evaluator import OpticMetrics
 
 
 def load_inputs(path: str) -> tuple[Inputs, list[str]]:
@@ -32,6 +29,7 @@ def load_inputs(path: str) -> tuple[Inputs, list[str]]:
         max_PE=d["max_PE"],
         N=d.get("N", 50),
         system_type=d["system_type"],
+        air_gap=d.get("air_gap", 1.0),
         eps=d.get("eps", 1e-12),
         root_imag_tol=d.get("root_imag_tol", 1e-9),
     )
@@ -53,8 +51,6 @@ def _val(v: Optional[float], fmt: str = ".4f") -> str:
     if v is None:
         return "N/A"
     try:
-        import math
-
         if not math.isfinite(v):
             return "N/A"
     except (TypeError, ValueError):
@@ -66,7 +62,7 @@ def _print_header() -> None:
     """Print the table header for the results."""
     header = (
         f"{'#':>3}  {'OK':>2}  {'Glass1':<22} {'Glass2':<22}"
-        f"  {'EFL':>8} {'FNO':>7}"
+        f"  {'EFL':>8} {'FNO':>7} {'BFD':>8}"
         f"  {'t1':>6} {'t2':>6} {'gap':>5}"
         f"  {'RMS':>8} {'GEO':>8}"
         f"  {'SA':>10} {'LchC':>10} {'TchC':>10}"
@@ -90,7 +86,7 @@ def _print_row(
     g2 = f"{cand.catalog2}:{cand.glass2}"
     print(
         f"{idx:3d}  {ok:>2}  {g1:<22} {g2:<22}"
-        f"  {_val(m.efl, '.1f'):>8} {_val(m.fno, '.3f'):>7}"
+        f"  {_val(m.efl, '.1f'):>8} {_val(m.fno, '.3f'):>7} {_val(m.bfd, '.1f'):>8}"
         f"  {_val(rx_t1, '.2f'):>6} {_val(rx_t2, '.2f'):>6} {_val(rx_gap, '.2f'):>5}"
         f"  {_val(m.rms_spot_radius, '.2f'):>8} {_val(m.geo_spot_radius, '.2f'):>8}"
         f"  {_val(m.SA, '.3f'):>10} {_val(m.LchC, '.3f'):>10} {_val(m.TchC, '.3f'):>10}"
@@ -136,26 +132,25 @@ def main() -> None:
             pp = config_dir / pp
         resolved.append(str(pp))
 
-    # ---- Step 1: Load catalogs ----
-    glasses = load_catalog(resolved)
-
-    # ---- Step 2: Thin-lens synthesis ----
-    t_synth = time.perf_counter()
-    if inputs.system_type == "cemented":
-        cands = run_cemented(inputs, glasses)
-    elif inputs.system_type == "spaced":
-        cands = run_spaced(inputs, glasses)
-    else:
-        raise ValueError(f"Unknown system_type={inputs.system_type}")
-    synth_ms = (time.perf_counter() - t_synth) * 1000.0
-
-    print(f"\nSynthesis: {len(cands)} candidates in {synth_ms:.1f} ms\n")
-
-    max_n = args.max_n if args.max_n > 0 else inputs.N
-    todo = cands[:max_n]
-
-    # ---- Thin-only mode ----
+    # ---- Thin-only mode: still needs direct synthesis ----
     if args.thin_only:
+        from .glass_reader import load_catalog
+        from .cemented import run_cemented
+        from .spaced import run_spaced
+
+        glasses = load_catalog(resolved)
+        t_synth = time.perf_counter()
+        if inputs.system_type == "cemented":
+            cands = run_cemented(inputs, glasses)
+        elif inputs.system_type == "spaced":
+            cands = run_spaced(inputs, glasses)
+        else:
+            raise ValueError(f"Unknown system_type={inputs.system_type}")
+        synth_ms = (time.perf_counter() - t_synth) * 1000.0
+        print(f"\nSynthesis: {len(cands)} candidates in {synth_ms:.1f} ms\n")
+
+        max_n = args.max_n if args.max_n > 0 else inputs.N
+        todo = cands[:max_n]
 
         def _cost_str(cost: Optional[float]) -> str:
             return f"{cost:.1f}" if cost is not None else "N/A"
@@ -176,125 +171,50 @@ def main() -> None:
                 )
         return
 
-    # ---- Step 3–5: Thicken → Build → Evaluate ----
+    # ---- Full pipeline via run_design() ----
     print("=" * 90)
     _print_header()
 
-    results: list[dict] = []
+    results_dicts: list[dict] = []
     n_ok = 0
 
-    for i, cand in enumerate(todo):
-        # Step 3: Thicken
-        t0 = time.perf_counter()
-        rx = thicken(cand, inputs)
-        thicken_ms = (time.perf_counter() - t0) * 1000.0
-
-        if rx is None:
-            # Thickening failed (sag rejection etc.)
-            m = OpticMetrics(
-                glass1=cand.glass1,
-                glass2=cand.glass2,
-                catalog1=cand.catalog1,
-                catalog2=cand.catalog2,
-                system_type=cand.system_type,
-                PE=cand.PE,
-                success=False,
-                error_msg="thickening failed (sag / geometry rejection)",
-                build_time_ms=thicken_ms,
-            )
-            _print_row(i, cand, m, None, None, None)
-            results.append(_build_result_dict(cand, m, None))
-            continue
-
-        # Step 4: Build optiland Optic
-        t1 = time.perf_counter()
-        op = build_optic_from_prescription(rx)
-        build_ms = (time.perf_counter() - t1) * 1000.0 + thicken_ms
-
-        if op is None:
-            m = OpticMetrics(
-                glass1=cand.glass1,
-                glass2=cand.glass2,
-                catalog1=cand.catalog1,
-                catalog2=cand.catalog2,
-                system_type=cand.system_type,
-                PE=cand.PE,
-                success=False,
-                error_msg="build_optic returned None",
-                build_time_ms=build_ms,
-            )
-            _print_row(
-                i, cand, m, rx.elements[0].t_center, rx.elements[1].t_center, rx.air_gap
-            )
-            results.append(_build_result_dict(cand, m, rx))
-            continue
-
-        # Step 5: Evaluate (ray tracing + aberrations)
-        m = evaluate(op, cand, inputs)
-        m.build_time_ms = build_ms
-
+    def _on_progress(current: int, total: int, pr: PipelineResult) -> None:
+        nonlocal n_ok
+        cand = pr.candidate
+        m = pr.metrics
+        rx = pr.rx
         if m.success:
             n_ok += 1
+        rx_t1 = rx.elements[0].t_center if rx else None
+        rx_t2 = rx.elements[1].t_center if rx else None
+        rx_gap = rx.air_gap if rx else None
+        _print_row(current - 1, cand, m, rx_t1, rx_t2, rx_gap)
+        results_dicts.append(pr.to_dict())
 
-        _print_row(
-            i,
-            cand,
-            m,
-            rx.elements[0].t_center,
-            rx.elements[1].t_center,
-            rx.air_gap,
-        )
-        results.append(_build_result_dict(cand, m, rx))
+    if args.max_n > 0:
+        inputs = replace(inputs, N=args.max_n)
+
+    dr = run_design(inputs, resolved, on_progress=_on_progress)
+
+    print(f"\nSynthesis: {len(dr.candidates)} candidates in {dr.synth_time_ms:.1f} ms")
 
     # ---- Summary ----
     total_ms = sum(
-        r.get("build_time_ms", 0) + r.get("eval_time_ms", 0) for r in results
+        r.get("build_time_ms", 0) + r.get("eval_time_ms", 0) for r in results_dicts
     )
     print("=" * 90)
     print(
-        f"\n  {n_ok}/{len(todo)} succeeded  |  Total: {total_ms:.1f} ms  "
-        f"({total_ms / max(len(todo), 1):.1f} ms/candidate)\n"
+        f"\n  {n_ok}/{len(dr.results)} succeeded  |  Total: {total_ms:.1f} ms  "
+        f"({total_ms / max(len(dr.results), 1):.1f} ms/candidate)\n"
     )
 
     # ---- JSON export ----
     if args.out:
         Path(args.out).write_text(
-            json.dumps(results, indent=2, ensure_ascii=False),
+            json.dumps(results_dicts, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
         print(f"Wrote {args.out}")
-
-
-def _build_result_dict(
-    cand: Candidate,
-    m: OpticMetrics,
-    rx,
-) -> dict:
-    """Merge candidate info, metrics, and prescription into one flat dict."""
-    d = asdict(m)
-
-    # Thin-lens radii
-    d["thin_radii"] = cand.radii
-
-    # Thick prescription details
-    if rx is not None:
-        elems = rx.elements
-        d["thick_radii"] = [
-            [elems[0].R_front, elems[0].R_back],
-            [elems[1].R_front, elems[1].R_back],
-        ]
-        d["t_center"] = [elems[0].t_center, elems[1].t_center]
-        d["t_edge"] = [elems[0].t_edge, elems[1].t_edge]
-        d["air_gap"] = rx.air_gap
-        d["back_focus_guess"] = rx.back_focus_guess
-    else:
-        d["thick_radii"] = None
-        d["t_center"] = None
-        d["t_edge"] = None
-        d["air_gap"] = None
-        d["back_focus_guess"] = None
-
-    return d
 
 
 if __name__ == "__main__":

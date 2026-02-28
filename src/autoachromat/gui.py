@@ -12,23 +12,17 @@ from __future__ import annotations
 import json
 import math
 import threading
-import time
 import tkinter as tk
-from dataclasses import asdict
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Optional
+from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
 # Project imports
 # ---------------------------------------------------------------------------
-from .glass_reader import load_catalog
 from .models import Candidate, Inputs, ThickPrescription
-from .cemented import run_cemented
-from .spaced import run_spaced
-from .thickening import thicken
-from .optiland_bridge.builder import build_optic_from_prescription
-from .optiland_bridge.evaluator import evaluate, OpticMetrics
+from .pipeline import run_design, PipelineResult
+from .optiland_bridge.evaluator import OpticMetrics
 
 
 # ---------------------------------------------------------------------------
@@ -54,28 +48,32 @@ def _fmt(v: Optional[float], fmt: str = ".4f") -> str:
 
 
 class ResultRow:
-    """Bundles Candidate + ThickPrescription + OpticMetrics for one row."""
+    """Bundles a PipelineResult with an index for display."""
 
-    __slots__ = ("cand", "rx", "metrics", "idx")
+    __slots__ = ("result", "idx")
 
-    def __init__(
-        self,
-        idx: int,
-        cand: Candidate,
-        rx: Optional[ThickPrescription],
-        metrics: OpticMetrics,
-    ):
+    def __init__(self, idx: int, result: PipelineResult):
         self.idx = idx
-        self.cand = cand
-        self.rx = rx
-        self.metrics = metrics
+        self.result = result
+
+    @property
+    def cand(self) -> Candidate:
+        return self.result.candidate
+
+    @property
+    def rx(self) -> Optional[ThickPrescription]:
+        return self.result.rx
+
+    @property
+    def metrics(self) -> OpticMetrics:
+        return self.result.metrics
 
 
 # ---------------------------------------------------------------------------
 # Main application window
 # ---------------------------------------------------------------------------
 
-_PAD = dict(padx=6, pady=3)
+_PAD: dict[str, Any] = dict(padx=6, pady=3)
 
 
 class AutoAchromatGUI(tk.Tk):
@@ -200,11 +198,29 @@ class AutoAchromatGUI(tk.Tk):
         type_frame = ttk.Frame(frame)
         type_frame.grid(row=r, column=1, columnspan=3, sticky=tk.W, **_PAD)
         ttk.Radiobutton(
-            type_frame, text="Cemented", variable=self._var_type, value="cemented"
+            type_frame,
+            text="Cemented",
+            variable=self._var_type,
+            value="cemented",
+            command=self._on_type_changed,
         ).pack(side=tk.LEFT, padx=4)
         ttk.Radiobutton(
-            type_frame, text="Spaced", variable=self._var_type, value="spaced"
+            type_frame,
+            text="Spaced",
+            variable=self._var_type,
+            value="spaced",
+            command=self._on_type_changed,
         ).pack(side=tk.LEFT, padx=4)
+
+        # Air gap (spaced only) — placed inside type_frame
+        ttk.Label(type_frame, text="  Air gap [mm]:").pack(side=tk.LEFT, padx=(12, 2))
+        self._var_air_gap = tk.DoubleVar(value=1.0)
+        self._ent_air_gap = ttk.Entry(
+            type_frame, textvariable=self._var_air_gap, width=8
+        )
+        self._ent_air_gap.pack(side=tk.LEFT, padx=2)
+        # Initially disabled (cemented selected by default)
+        self._ent_air_gap.configure(state=tk.DISABLED)
 
         ttk.Label(frame, text="Top-N:").grid(row=r, column=5, sticky=tk.E, **_PAD)
         self._var_N = tk.IntVar(value=20)
@@ -227,6 +243,13 @@ class AutoAchromatGUI(tk.Tk):
         ttk.Button(cat_frame, text="−", width=3, command=self._clear_catalogs).pack(
             side=tk.LEFT, padx=2
         )
+
+    def _on_type_changed(self) -> None:
+        """Enable/disable air gap entry based on system type selection."""
+        if self._var_type.get() == "spaced":
+            self._ent_air_gap.configure(state=tk.NORMAL)
+        else:
+            self._ent_air_gap.configure(state=tk.DISABLED)
 
     # ------------------------------------------------------------------
     # ② Control bar
@@ -308,7 +331,7 @@ class AutoAchromatGUI(tk.Tk):
             self._tree.heading(
                 cid, text=display, command=lambda c=cid: self._on_sort(c)
             )
-            self._tree.column(cid, width=width, anchor=anchor, minwidth=40)
+            self._tree.column(cid, width=width, anchor=anchor, minwidth=40)  # type: ignore[arg-type]
 
         # Scrollbars
         vsb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self._tree.yview)
@@ -413,6 +436,8 @@ class AutoAchromatGUI(tk.Tk):
         self._var_max_PE.set(d.get("max_PE", 100.0))
         self._var_N.set(d.get("N", 20))
         self._var_type.set(d.get("system_type", "cemented"))
+        self._var_air_gap.set(d.get("air_gap", 1.0))
+        self._on_type_changed()
 
         # Catalog paths (resolve relative to config dir)
         config_dir = Path(path).resolve().parent
@@ -443,7 +468,8 @@ class AutoAchromatGUI(tk.Tk):
             min_delta_nu=self._var_min_dnu.get(),
             max_PE=self._var_max_PE.get(),
             N=self._var_N.get(),
-            system_type=self._var_type.get(),
+            system_type=self._var_type.get(),  # type: ignore[arg-type]
+            air_gap=self._var_air_gap.get(),
         )
 
     # ===================================================================
@@ -475,102 +501,36 @@ class AutoAchromatGUI(tk.Tk):
         try:
             inputs = self._make_inputs()
 
-            # Step 1: Load catalogs
-            self._set_status("Loading catalogs...")
-            glasses = load_catalog(self._catalog_paths)
-            n_glasses = (
-                sum(len(v) for v in glasses.values())
-                if isinstance(glasses, dict)
-                else len(glasses)
-            )
-            self._set_status(
-                f"Loaded {n_glasses} glasses from {len(self._catalog_paths)} catalog(s)"
-            )
+            self._set_status("Running design pipeline...")
 
-            # Step 2: Thin-lens synthesis
-            self._set_status("Running thin-lens synthesis...")
-            t0 = time.perf_counter()
-            if inputs.system_type == "cemented":
-                cands = run_cemented(inputs, glasses)
-            elif inputs.system_type == "spaced":
-                cands = run_spaced(inputs, glasses)
-            else:
-                raise ValueError(f"Unknown system_type={inputs.system_type}")
-            synth_ms = (time.perf_counter() - t0) * 1000.0
-            self._set_status(f"Synthesis: {len(cands)} candidates in {synth_ms:.0f} ms")
-
-            # Step 3-5: Thicken → Build → Evaluate  (top-N)
-            top_n = inputs.N
-            todo = cands[:top_n]
-            self._set_progress(0, len(todo))
-
-            for i, cand in enumerate(todo):
-                self._set_status(
-                    f"Processing {i + 1}/{len(todo)}: {cand.glass1} + {cand.glass2} ..."
-                )
-
-                # Thicken
-                t_start = time.perf_counter()
-                rx = thicken(cand, inputs)
-
-                if rx is None:
-                    m = OpticMetrics(
-                        glass1=cand.glass1,
-                        glass2=cand.glass2,
-                        catalog1=cand.catalog1,
-                        catalog2=cand.catalog2,
-                        system_type=cand.system_type,
-                        PE=cand.PE,
-                        success=False,
-                        error_msg="thickening failed",
-                        build_time_ms=(time.perf_counter() - t_start) * 1000.0,
-                    )
-                    row = ResultRow(i, cand, None, m)
-                    self._results.append(row)
-                    self._insert_tree_row(row)
-                    self._set_progress(i + 1, len(todo))
-                    continue
-
-                # Build
-                op = build_optic_from_prescription(rx)
-                build_ms = (time.perf_counter() - t_start) * 1000.0
-
-                if op is None:
-                    m = OpticMetrics(
-                        glass1=cand.glass1,
-                        glass2=cand.glass2,
-                        catalog1=cand.catalog1,
-                        catalog2=cand.catalog2,
-                        system_type=cand.system_type,
-                        PE=cand.PE,
-                        success=False,
-                        error_msg="build failed",
-                        build_time_ms=build_ms,
-                    )
-                    row = ResultRow(i, cand, rx, m)
-                    self._results.append(row)
-                    self._insert_tree_row(row)
-                    self._set_progress(i + 1, len(todo))
-                    continue
-
-                # Evaluate
-                m = evaluate(op, cand, inputs)
-                m.build_time_ms = build_ms
-
-                row = ResultRow(i, cand, rx, m)
+            def _on_progress(current: int, total: int, pr: PipelineResult) -> None:
+                row = ResultRow(current - 1, pr)
                 self._results.append(row)
                 self._insert_tree_row(row)
-                self._set_progress(i + 1, len(todo))
+                self._set_progress(current, total)
+                self._set_status(
+                    f"Processing {current}/{total}: "
+                    f"{pr.candidate.glass1} + {pr.candidate.glass2} ..."
+                )
+
+            dr = run_design(
+                inputs,
+                self._catalog_paths,
+                on_progress=_on_progress,
+            )
 
             n_ok = sum(1 for r in self._results if r.metrics.success)
             self._set_status(
-                f"Done — {n_ok}/{len(todo)} succeeded  |  "
-                f"Synthesis: {len(cands)} candidates  |  {synth_ms:.0f} ms"
+                f"Done — {n_ok}/{len(dr.results)} succeeded  |  "
+                f"Synthesis: {len(dr.candidates)} candidates  |  "
+                f"{dr.synth_time_ms:.0f} ms"
             )
 
         except Exception as e:
             self._set_status(f"ERROR: {e}")
-            self.after(0, lambda: messagebox.showerror("Pipeline Error", str(e)))
+            self.after(
+                0, lambda err=e: messagebox.showerror("Pipeline Error", str(err))
+            )
 
         finally:
             self.after(0, self._pipeline_done)
@@ -749,7 +709,10 @@ class AutoAchromatGUI(tk.Tk):
             lines.append(
                 f"   3  {e1.R_back:10.3f}  {e2.t_center:8.3f}  n={e2.nd:.4f} ν={e2.vd:.1f}"
             )
-            lines.append(f"   4  {e2.R_back:10.3f}  {rx.back_focus_guess:8.1f}  Air")
+            _bfd = (
+                row.metrics.bfd if row.metrics.bfd is not None else rx.back_focus_guess
+            )
+            lines.append(f"   4  {e2.R_back:10.3f}  {_bfd:8.3f}  Air")
         else:
             lines.append(
                 f" STO  {e1.R_front:10.3f}  {e1.t_center:8.3f}  n={e1.nd:.4f} ν={e1.vd:.1f}"
@@ -758,7 +721,10 @@ class AutoAchromatGUI(tk.Tk):
             lines.append(
                 f"   4  {e2.R_front:10.3f}  {e2.t_center:8.3f}  n={e2.nd:.4f} ν={e2.vd:.1f}"
             )
-            lines.append(f"   5  {e2.R_back:10.3f}  {rx.back_focus_guess:8.1f}  Air")
+            _bfd = (
+                row.metrics.bfd if row.metrics.bfd is not None else rx.back_focus_guess
+            )
+            lines.append(f"   5  {e2.R_back:10.3f}  {_bfd:8.3f}  Air")
 
         lines.append(f" IMG  {'∞':>10}  {'—':>8}")
 
@@ -800,6 +766,16 @@ class AutoAchromatGUI(tk.Tk):
         lines.append("  ───────────────────────")
         lines.append(f"  EFL: {_fmt(m.efl, '.3f')} mm")
         lines.append(f"  FNO: {_fmt(m.fno, '.4f')}")
+        lines.append(f"  BFD: {_fmt(m.bfd, '.3f')} mm")
+        rx = row.rx
+        if rx is not None and rx.actual_efl is not None:
+            dev_pct = (rx.efl_deviation or 0.0) * 100.0
+            lines.append("")
+            lines.append("  Thick-lens EFL (ABCD)")
+            lines.append("  ───────────────────────")
+            lines.append(f"  EFL (thick):  {rx.actual_efl:.3f} mm")
+            lines.append(f"  EFL (target): {_fmt(m.efl, '.3f')} mm")
+            lines.append(f"  Deviation:    {dev_pct:+.3f} %")
 
         w.insert(tk.END, "\n".join(lines))
         w.configure(state=tk.DISABLED)
@@ -822,7 +798,7 @@ class AutoAchromatGUI(tk.Tk):
         if rx is not None:
             e1, e2 = rx.elements
             lines.append("")
-            lines.append("  Thick-lens Radii (corrected)")
+            lines.append("  Thick-lens Radii (unchanged)")
             lines.append("  ─────────────────────────")
             if rx.system_type == "cemented":
                 lines.append(f"  R1 = {e1.R_front:12.4f} mm")
@@ -854,28 +830,7 @@ class AutoAchromatGUI(tk.Tk):
 
     def _export_data(self) -> list[dict]:
         """Build JSON-serialisable list from results."""
-        out = []
-        for row in self._results:
-            d = asdict(row.metrics)
-            d["thin_radii"] = row.cand.radii
-            if row.rx is not None:
-                elems = row.rx.elements
-                d["thick_radii"] = [
-                    [elems[0].R_front, elems[0].R_back],
-                    [elems[1].R_front, elems[1].R_back],
-                ]
-                d["t_center"] = [elems[0].t_center, elems[1].t_center]
-                d["t_edge"] = [elems[0].t_edge, elems[1].t_edge]
-                d["air_gap"] = row.rx.air_gap
-                d["back_focus_guess"] = row.rx.back_focus_guess
-            else:
-                d["thick_radii"] = None
-                d["t_center"] = None
-                d["t_edge"] = None
-                d["air_gap"] = None
-                d["back_focus_guess"] = None
-            out.append(d)
-        return out
+        return [row.result.to_dict() for row in self._results]
 
     def _on_export_json(self) -> None:
         path = filedialog.asksaveasfilename(

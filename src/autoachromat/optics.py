@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
 from .glass_reader import Glass
+
+logger = logging.getLogger(__name__)
 
 
 # Defaults (only used if caller doesn't pass)
@@ -191,3 +194,45 @@ def achromat_power(nu1: float, nu2: float, C0: float) -> tuple[float, float]:
 def check_min_radius(radii: tuple[float, ...], D: float) -> bool:
     rmin = D / 2.0
     return all(abs(r) >= rmin for r in radii)
+
+
+def prepare_glass_data(
+    glasses: list[Glass],
+    lam0: float,
+    lam1: float,
+    lam2: float,
+) -> list[tuple[Glass, float, float]]:
+    """Filter glasses and precompute n(λ₀) and ν for each.
+
+    Parameters
+    ----------
+    glasses : list[Glass]
+        Raw glass catalog entries.
+    lam0, lam1, lam2 : float
+        Design wavelengths [µm].
+
+    Returns
+    -------
+    list[tuple[Glass, float, float]]
+        Each entry is ``(glass, n0, nu)`` where *n0* is the refractive
+        index at *lam0* and *nu* is the Abbe number.
+    """
+    cfg = Config(lam0, lam1, lam2)
+    usable = filter_glasses(glasses, cfg)
+    gdata: list[tuple[Glass, float, float]] = []
+    n_skipped = 0
+    for g in usable:
+        try:
+            n0 = refractive_index(g, lam0)
+            nu = compute_abbe_number(g, lam0, lam1, lam2)
+        except (ValueError, ZeroDivisionError) as exc:
+            logger.debug("Skipping glass %s:%s – %s", g.catalog, g.name, exc)
+            n_skipped += 1
+            continue
+        gdata.append((g, n0, nu))
+    if n_skipped:
+        logger.info(
+            "prepare_glass_data: skipped %d glasses due to dispersion errors",
+            n_skipped,
+        )
+    return gdata

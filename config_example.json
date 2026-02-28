@@ -13,5 +13,6 @@
     "min_delta_nu": 10,
     "max_PE": 100,
     "N": 20,
-    "system_type": "cemented"
+    "system_type": "cemented",
+    "air_gap": 1.0
 }

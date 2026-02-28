@@ -1,18 +1,20 @@
 # AutoAchromat
 
-AutoAchromat is a Python tool for enumerating achromatic two-element lens candidates from AGF glass catalogs.
+Automated achromatic doublet designer — from glass catalog to ray-traced evaluation in one pipeline.
 
-It currently supports two design modes:
+Reads AGF glass catalogs (SCHOTT, OHARA, CDGM, …), enumerates two-element achromatic lens candidates via thin-lens theory, converts them to thick-lens prescriptions, builds ray-tracing models with [optiland](https://github.com/HarrisonKramer/optiland), and evaluates optical performance (spot size, Seidel aberrations, chromatic errors).
 
-- `cemented`: cemented doublet (`R1, R2, R3`)
-- `spaced`: separated doublet (`R1, R2, R3, R4`)
+Supports two design modes:
 
-The solver reads glass data from AGF catalogs (for example SCHOTT, OHARA, CDGM), computes refractive index and Abbe number at configured wavelengths, applies constraints, and ranks accepted candidates.
+| Mode | Surfaces | Ranking |
+|------|----------|---------|
+| `cemented` | R₁, R₂, R₃ (shared cement interface) | Top-N by \|W − W₀\|, then PE |
+| `spaced` | R₁, R₂, R₃, R₄ (air gap between elements) | All accepted, sorted by PE |
 
 ## Requirements
 
-- Python `>= 3.10`
-- `numpy`
+- Python ≥ 3.10
+- `numpy`, `optiland`
 
 ## Installation
 
@@ -20,90 +22,82 @@ The solver reads glass data from AGF catalogs (for example SCHOTT, OHARA, CDGM),
 pip install -e .
 ```
 
-After installation, the CLI entry point is:
+## Usage
+
+### CLI
 
 ```bash
-autoachromat
+autoachromat --config config_example.json                  # full pipeline
+autoachromat --config config_example.json --thin-only      # thin-lens only (no ray tracing)
+autoachromat --config config_example.json --out results.json --max-n 50
 ```
 
-You can also run as a module:
+| Flag | Description |
+|------|-------------|
+| `--config` | Path to JSON config (required) |
+| `--out` | Export results to JSON |
+| `--max-n` | Max candidates to evaluate (default: config `N`) |
+| `--thin-only` | Skip thickening / ray tracing |
+
+### GUI
 
 ```bash
-python -m autoachromat.cli
+autoachromat-gui
 ```
 
-## Quick Start
+Tkinter desktop application providing:
 
-Run with catalogs declared in your JSON config:
-
-```bash
-autoachromat --config config_example.json
-```
-
-Write full accepted candidates to JSON:
-
-```bash
-autoachromat --config config_example.json --out results.json
-```
+- **Input panel** — edit all optical parameters (f', D, wavelengths, C₀/P₀/W₀, constraints) and load/save JSON configs
+- **Catalog browser** — add/remove AGF catalog files
+- **One-click run** — executes the full pipeline (synthesis → thickening → build → evaluate) in a background thread with progress bar
+- **Sortable results table** — columns for glass pair, EFL, F/#, RMS/GEO spot, SA, LchC, TchC, PE, build time; click any header to sort
+- **Detail panel** — select a row to see full thin-lens parameters, thick-lens prescription, all Seidel coefficients, and radii
+- **Export** — save results as JSON or CSV
 
 ## Config File
 
-`--config` points to a JSON file. Example: [config_example.json](config_example.json).
+See [config_example.json](config_example.json). Key fields:
 
-Supported fields:
+| Field | Description |
+|-------|-------------|
+| `catalogs` | List of AGF file paths (relative to config dir) |
+| `lam0`, `lam1`, `lam2` | Design wavelengths [µm] |
+| `D` | Clear aperture diameter [mm] |
+| `fprime` | Target effective focal length [mm] |
+| `C0`, `P0`, `W0` | Aberration target constants |
+| `min_delta_nu` | Minimum Abbe number difference for glass pairs |
+| `max_PE` | Maximum PE threshold |
+| `N` | Top-N candidates to keep (cemented) |
+| `system_type` | `"cemented"` or `"spaced"` |
 
-- `catalogs`: required list of AGF paths.
-- `lam0`, `lam1`, `lam2`: wavelengths in micrometers.
-- `D`: clear aperture (same unit system as `fprime`, typically mm).
-- `fprime`: effective focal length target.
-- `C0`, `P0`, `W0`: model target constants.
-- `min_delta_nu`: minimum `|nu1 - nu2|` for a glass pair.
-- `max_PE`: reject candidates with `PE > max_PE`.
-- `N`: Top-N for cemented mode. (`spaced` currently does not use Top-N truncation.)
-- `system_type`: `"cemented"` or `"spaced"`.
-- `eps`: optional numeric tolerance, default `1e-12`.
-- `root_imag_tol`: optional complex-root tolerance, default `1e-9`.
+## Pipeline
 
-Path resolution behavior:
+```
+AGF files ──▶ glass_reader ──▶ filter ──▶ thin-lens synthesis ──▶ thickening ──▶ optiland build ──▶ evaluate
+                                          (cemented | spaced)     (Table 10-2/3    (Optic model)    (spot, Seidel,
+                                                                   + power corr.)                    chromatic)
+```
 
-- If catalog paths are relative, they are resolved relative to the config file directory.
-- If `catalogs` is missing or empty, CLI exits with an error.
-
-## Output Behavior
-
-CLI output includes:
-
-- `Accepted: <count>`: number of candidates kept after filtering
-- Top 20 formatted candidates printed to stdout
-- Optional full JSON output via `--out`
-
-Ranking differs by mode:
-
-- `cemented`: keeps Top-N by smallest `|W - W0|`, then sorts by `(|W-W0|, PE)`
-- `spaced`: keeps all accepted candidates, then sorts by `PE`
-
-## Why Some Top Results Look Identical
-
-This is expected in many runs:
-
-- Different catalog entries can have effectively identical optical properties at (`lam0`, `lam1`, `lam2`).
-- Those entries can produce the same `Q` (or `(Q1, Q2)`), radii, and `PE`.
-- The CLI prints only the first 20 results, so repeated-equivalent solutions often appear grouped.
+1. **Glass loading** — parse AGF catalogs, compute n(λ) via 12 dispersion formulas, compute Abbe numbers, filter invalid/out-of-range glasses
+2. **Thin-lens synthesis** — enumerate all glass pairs with |Δν| ≥ threshold, solve for shape parameters Q (cemented) or (Q₁, Q₂) (spaced), compute radii and aberration figures of merit
+3. **Thickening** — assign center/edge thicknesses per standard tables, iteratively correct radii to preserve thin-lens power
+4. **Build** — translate thick prescription into optiland `Optic` (aperture, field, wavelengths, image solve)
+5. **Evaluate** — extract EFL, F/#, RMS/geometric spot radius, Seidel coefficients (SA, CC, AC, PC, DC), and chromatic aberrations (LchC, TchC)
 
 ## Project Layout
 
 ```text
 src/autoachromat/
-  cli.py          # command-line entry
-  glass_reader.py # AGF parser
-  optics.py       # refractive index, Abbe, shared optics utilities
-  cemented.py     # cemented solver
-  spaced.py       # spaced solver
-  models.py       # Inputs and Candidate data models
+  models.py           # data structures: Inputs, Candidate, ElementRx, ThickPrescription
+  glass_reader.py     # AGF catalog parser (NM/CD/LD/ED/OD tags)
+  optics.py           # refractive index, Abbe number, achromat power split, radius checks
+  cemented.py         # cemented doublet thin-lens solver
+  spaced.py           # air-spaced doublet thin-lens solver
+  thickening.py       # thin → thick lens conversion (sag, thickness tables, radius correction)
+  cli.py              # CLI entry point
+  gui.py              # Tkinter GUI
+  optiland_bridge/
+    builder.py        # ThickPrescription → optiland Optic
+    evaluator.py      # ray tracing + aberration extraction → OpticMetrics
+data/catalogs/        # AGF glass catalog files
 ```
-
-## Development Notes
-
-- AGF parser supports common dispersion formula IDs used by catalogs.
-- Glass filtering excludes invalid dispersion entries and out-of-range wavelength coverage.
-- Candidate fields include optional glass relative costs from AGF `OD` records.

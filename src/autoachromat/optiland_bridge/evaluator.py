@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import logging
 import time
+import types
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any
 
@@ -45,6 +47,7 @@ class OpticMetrics:
     # Paraxial
     efl: Optional[float] = None  # effective focal length (f2)
     fno: Optional[float] = None  # image-space F/#
+    bfd: Optional[float] = None  # back focal distance (last surface → image)
 
     # Spot diagram (on-axis, across all wavelengths)
     rms_spot_radius: Optional[float] = None  # mean RMS across wavelengths
@@ -87,6 +90,34 @@ class OpticMetrics:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+# ---------------------------------------------------------------------------
+# Monkey-patch helper for optiland chromatic dispersion
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _patched_dispersion(ab, op, inputs: Inputs):
+    """Temporarily patch optiland's _precalculations to use design wavelengths.
+
+    optiland hardcodes F/C Fraunhofer lines for _dn computation.  For
+    non-visible designs this is wrong.  This context manager installs a
+    patched version and guarantees cleanup via ``finally``.
+    """
+    _orig_precalc = type(ab)._precalculations
+
+    def _patched_precalc(self_ab):
+        _orig_precalc(self_ab)
+        self_ab._dn = op.n(inputs.lam1) - op.n(inputs.lam2)
+
+    ab._precalculations = types.MethodType(_patched_precalc, ab)
+    try:
+        yield
+    finally:
+        # Restore original behaviour by removing instance override
+        if hasattr(ab, "_precalculations"):
+            del ab._precalculations
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +170,9 @@ def evaluate(
         m.efl = float(op.paraxial.f2())
         m.fno = float(op.paraxial.FNO())
 
+        # ---- Back focal distance (after image_solve) ----
+        m.bfd = float(op.surface_group.surfaces[-2].thickness)
+
         # ---- Spot diagram (on-axis, all wavelengths) ----
         spot = SpotDiagram(
             op, fields="all", wavelengths="all", num_rings=6, distribution="hexapolar"
@@ -160,21 +194,27 @@ def evaluate(
 
         # ---- Seidel / third-order aberrations ----
         ab = op.aberrations
-        m.SA = _scalar(ab.SC())
-        m.CC = _scalar(ab.CC())
-        m.AC = _scalar(ab.AC())
-        m.PC = _scalar(ab.PC())
-        m.DC = _scalar(ab.DC())
 
-        # Transverse Seidel
-        m.TSC = _scalar(ab.TSC())
-        m.TCC = _scalar(ab.TCC())
-        m.TAC = _scalar(ab.TAC())
-        m.TPC = _scalar(ab.TPC())
+        # Patch optiland's hardcoded chromatic dispersion (F/C lines) to use
+        # the actual design wavelengths.  optiland computes
+        #   _dn = n(0.4861) - n(0.6563)
+        # inside _precalculations(), but for non-visible designs this is wrong.
+        with _patched_dispersion(ab, op, inputs):
+            m.SA = _scalar(ab.SC())
+            m.CC = _scalar(ab.CC())
+            m.AC = _scalar(ab.AC())
+            m.PC = _scalar(ab.PC())
+            m.DC = _scalar(ab.DC())
 
-        # ---- Chromatic ----
-        m.LchC = _scalar(ab.LchC())
-        m.TchC = _scalar(ab.TchC())
+            # Transverse Seidel
+            m.TSC = _scalar(ab.TSC())
+            m.TCC = _scalar(ab.TCC())
+            m.TAC = _scalar(ab.TAC())
+            m.TPC = _scalar(ab.TPC())
+
+            # ---- Chromatic ----
+            m.LchC = _scalar(ab.LchC())
+            m.TchC = _scalar(ab.TchC())
 
         m.success = True
 
@@ -195,7 +235,8 @@ def evaluate(
 
 
 # ---------------------------------------------------------------------------
-# Batch convenience
+# ---------------------------------------------------------------------------
+# Batch convenience  (DEPRECATED – use pipeline.run_pipeline instead)
 # ---------------------------------------------------------------------------
 
 
@@ -207,6 +248,11 @@ def batch_evaluate(
     max_n: Optional[int] = None,
 ) -> List[OpticMetrics]:
     """Build + evaluate a list of candidates in one call.
+
+    .. deprecated::
+        Use :func:`autoachromat.pipeline.run_pipeline` instead.
+        This function is kept only for backward compatibility with
+        ``test_bridge.py`` and will be removed in a future release.
 
     Parameters
     ----------
@@ -225,6 +271,14 @@ def batch_evaluate(
         One entry per candidate (in the same order).  Candidates that
         failed to build have ``success=False`` and ``error_msg`` set.
     """
+    import warnings
+
+    warnings.warn(
+        "batch_evaluate() is deprecated; use pipeline.run_pipeline() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     todo = candidates[:max_n] if max_n else candidates
     results: List[OpticMetrics] = []
     n_ok = 0
