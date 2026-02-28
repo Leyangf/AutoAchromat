@@ -318,6 +318,112 @@ def _reconcile_cemented_radius(
 
 
 # ---------------------------------------------------------------------------
+# System EFL via ABCD (paraxial ray-transfer) matrix
+# ---------------------------------------------------------------------------
+
+_EFL_CORRECTION_ITER = 3  # outer EFL-correction rounds
+_EFL_TOL = 1e-9  # relative convergence tolerance
+
+
+def _mat2_mul(
+    a: tuple[tuple[float, float], tuple[float, float]],
+    b: tuple[tuple[float, float], tuple[float, float]],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Multiply two 2\u00d72 matrices ``a @ b``."""
+    return (
+        (
+            a[0][0] * b[0][0] + a[0][1] * b[1][0],
+            a[0][0] * b[0][1] + a[0][1] * b[1][1],
+        ),
+        (
+            a[1][0] * b[0][0] + a[1][1] * b[1][0],
+            a[1][0] * b[0][1] + a[1][1] * b[1][1],
+        ),
+    )
+
+
+def _refraction_matrix(
+    R: float, n_before: float, n_after: float
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Refraction matrix at a spherical surface of radius *R*."""
+    if not math.isfinite(R) or abs(R) < 1e-12:
+        phi = 0.0
+    else:
+        phi = (n_after - n_before) / R
+    return ((1.0, 0.0), (-phi, 1.0))
+
+
+def _transfer_matrix(
+    t: float, n: float
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Transfer (propagation) matrix for thickness *t* in medium index *n*."""
+    return ((1.0, t / n), (0.0, 1.0))
+
+
+def _system_efl_cemented(
+    R1: float,
+    R2: float,
+    R3: float,
+    t1: float,
+    t2: float,
+    n1: float,
+    n2: float,
+) -> float:
+    """Paraxial system EFL for a cemented doublet (ABCD matrix method).
+
+    Surface model::
+
+        air(1) \u2192 R1 \u2192 glass(n1), thickness t1
+               \u2192 R2 \u2192 glass(n2), thickness t2
+               \u2192 R3 \u2192 air(1)
+
+    Returns ``f' = -1/C`` where the system matrix is ``((A,B),(C,D))``.
+    """
+    M = _refraction_matrix(R1, 1.0, n1)
+    M = _mat2_mul(_transfer_matrix(t1, n1), M)
+    M = _mat2_mul(_refraction_matrix(R2, n1, n2), M)
+    M = _mat2_mul(_transfer_matrix(t2, n2), M)
+    M = _mat2_mul(_refraction_matrix(R3, n2, 1.0), M)
+    C = M[1][0]
+    if abs(C) < 1e-15:
+        return float("inf")
+    return -1.0 / C
+
+
+def _system_efl_spaced(
+    R1: float,
+    R2: float,
+    R3: float,
+    R4: float,
+    t1: float,
+    t2: float,
+    air_gap: float,
+    n1: float,
+    n2: float,
+) -> float:
+    """Paraxial system EFL for an air-spaced doublet (ABCD matrix method).
+
+    Surface model::
+
+        air(1) \u2192 R1 \u2192 glass(n1), thickness t1
+               \u2192 R2 \u2192 air(1),    thickness air_gap
+               \u2192 R3 \u2192 glass(n2), thickness t2
+               \u2192 R4 \u2192 air(1)
+    """
+    M = _refraction_matrix(R1, 1.0, n1)
+    M = _mat2_mul(_transfer_matrix(t1, n1), M)
+    M = _mat2_mul(_refraction_matrix(R2, n1, 1.0), M)
+    M = _mat2_mul(_transfer_matrix(air_gap, 1.0), M)
+    M = _mat2_mul(_refraction_matrix(R3, 1.0, n2), M)
+    M = _mat2_mul(_transfer_matrix(t2, n2), M)
+    M = _mat2_mul(_refraction_matrix(R4, n2, 1.0), M)
+    C = M[1][0]
+    if abs(C) < 1e-15:
+        return float("inf")
+    return -1.0 / C
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -357,44 +463,19 @@ def thicken_cemented(
 ) -> ThickPrescription | None:
     """Compute a thick-lens prescription for a cemented doublet.
 
-    Iteratively determines thicknesses and corrects radii to preserve
-    each element's thin-lens power.
+    Assigns physical thicknesses to the thin-lens geometry **without**
+    modifying any radii.  This preserves the achromatic balance and
+    aberration correction from the thin-lens synthesis stage exactly.
+
+    The resulting EFL will deviate slightly from the target (~0.3-1%)
+    due to thick-lens effects.  The deviation is recorded in
+    ``actual_efl`` / ``efl_deviation`` for downstream reporting.
 
     Returns ``None`` if any element has invalid geometry.
     """
     R1, R2, R3 = cand.radii[0], cand.radii[1], cand.radii[2]
 
-    # --- iterative thickness ↔ radius correction ---
-    for _iter in range(_CORRECTION_ITER):
-        result1 = element_thickness(R1, R2, inp.D, cand.n1)
-        if result1 is None:
-            return None
-        t1, _ = result1
-
-        result2 = element_thickness(R2, R3, inp.D, cand.n2)
-        if result2 is None:
-            return None
-        t2, _ = result2
-
-        # correct radii to keep Φ_thick = Φ_thin
-        corr1 = correct_radii_for_thickness(R1, R2, t1, cand.n1)
-        if corr1 is None:
-            return None
-        R1_new, R2_from_e1 = corr1
-
-        corr2 = correct_radii_for_thickness(R2, R3, t2, cand.n2)
-        if corr2 is None:
-            return None
-        R2_from_e2, R3_new = corr2
-
-        # reconcile the shared cemented surface
-        R2_new = _reconcile_cemented_radius(R2_from_e1, R2_from_e2)
-
-        R1 = _round6(R1_new)
-        R2 = _round6(R2_new)
-        R3 = _round6(R3_new)
-
-    # final thickness with corrected radii
+    # --- assign physical thicknesses (radii unchanged) ---
     result1 = element_thickness(R1, R2, inp.D, cand.n1)
     if result1 is None:
         return None
@@ -405,6 +486,14 @@ def thicken_cemented(
         return None
     t2, te2 = result2
 
+    # --- compute actual thick-lens EFL for reporting ---
+    actual_efl = _system_efl_cemented(R1, R2, R3, t1, t2, cand.n1, cand.n2)
+    efl_dev = (
+        (actual_efl - inp.fprime) / inp.fprime
+        if math.isfinite(actual_efl) and abs(inp.fprime) > 1e-12
+        else None
+    )
+
     elem1 = ElementRx(
         R_front=R1,
         R_back=R2,
@@ -412,6 +501,8 @@ def thicken_cemented(
         t_edge=te1,
         nd=cand.n1,
         vd=cand.nu1,
+        formula_id=cand.formula_id1,
+        cd=list(cand.cd1),
     )
     elem2 = ElementRx(
         R_front=R2,
@@ -420,6 +511,8 @@ def thicken_cemented(
         t_edge=te2,
         nd=cand.n2,
         vd=cand.nu2,
+        formula_id=cand.formula_id2,
+        cd=list(cand.cd2),
     )
 
     return ThickPrescription(
@@ -429,6 +522,8 @@ def thicken_cemented(
         back_focus_guess=_initial_back_focus(inp.fprime),
         D=inp.D,
         wavelengths=(inp.lam1, inp.lam0, inp.lam2),
+        actual_efl=actual_efl,
+        efl_deviation=efl_dev,
     )
 
 
@@ -438,38 +533,20 @@ def thicken_spaced(
 ) -> ThickPrescription | None:
     """Compute a thick-lens prescription for an air-spaced doublet.
 
-    Iteratively determines thicknesses and corrects radii to preserve
-    each element's thin-lens power.
+    Assigns physical thicknesses to the thin-lens geometry **without**
+    modifying any radii.  This preserves the achromatic balance and
+    aberration correction from the thin-lens synthesis stage exactly.
+
+    The resulting EFL will deviate slightly from the target due to
+    thick-lens effects.  The deviation is recorded for reporting.
 
     Returns ``None`` if any element has invalid geometry.
     """
     R1, R2 = cand.radii[0], cand.radii[1]
     R3, R4 = cand.radii[2], cand.radii[3]
+    air_gap = inp.air_gap
 
-    # --- iterative thickness ↔ radius correction ---
-    for _iter in range(_CORRECTION_ITER):
-        result1 = element_thickness(R1, R2, inp.D, cand.n1)
-        if result1 is None:
-            return None
-        t1, _ = result1
-
-        result2 = element_thickness(R3, R4, inp.D, cand.n2)
-        if result2 is None:
-            return None
-        t2, _ = result2
-
-        # correct radii (independent elements – no shared surface)
-        corr1 = correct_radii_for_thickness(R1, R2, t1, cand.n1)
-        if corr1 is None:
-            return None
-        R1, R2 = _round6(corr1[0]), _round6(corr1[1])
-
-        corr2 = correct_radii_for_thickness(R3, R4, t2, cand.n2)
-        if corr2 is None:
-            return None
-        R3, R4 = _round6(corr2[0]), _round6(corr2[1])
-
-    # final thickness with corrected radii
+    # --- assign physical thicknesses (radii unchanged) ---
     result1 = element_thickness(R1, R2, inp.D, cand.n1)
     if result1 is None:
         return None
@@ -480,6 +557,14 @@ def thicken_spaced(
         return None
     t2, te2 = result2
 
+    # --- compute actual thick-lens EFL for reporting ---
+    actual_efl = _system_efl_spaced(R1, R2, R3, R4, t1, t2, air_gap, cand.n1, cand.n2)
+    efl_dev = (
+        (actual_efl - inp.fprime) / inp.fprime
+        if math.isfinite(actual_efl) and abs(inp.fprime) > 1e-12
+        else None
+    )
+
     elem1 = ElementRx(
         R_front=R1,
         R_back=R2,
@@ -487,6 +572,8 @@ def thicken_spaced(
         t_edge=te1,
         nd=cand.n1,
         vd=cand.nu1,
+        formula_id=cand.formula_id1,
+        cd=list(cand.cd1),
     )
     elem2 = ElementRx(
         R_front=R3,
@@ -495,15 +582,19 @@ def thicken_spaced(
         t_edge=te2,
         nd=cand.n2,
         vd=cand.nu2,
+        formula_id=cand.formula_id2,
+        cd=list(cand.cd2),
     )
 
     return ThickPrescription(
         system_type="spaced",
         elements=[elem1, elem2],
-        air_gap=_placeholder_air_gap(inp.D),
+        air_gap=air_gap,
         back_focus_guess=_initial_back_focus(inp.fprime),
         D=inp.D,
         wavelengths=(inp.lam1, inp.lam0, inp.lam2),
+        actual_efl=actual_efl,
+        efl_deviation=efl_dev,
     )
 
 

@@ -1,12 +1,12 @@
 """
-test_bridge.py – End-to-end smoke test for the optiland bridge (Stage A).
+smoke_test_bridge.py – End-to-end smoke test for the optiland bridge.
 
 Usage:
-    python -m autoachromat.optiland_bridge.test_bridge --config config_example.json
-    python -m autoachromat.optiland_bridge.test_bridge --config config_example.json --max-n 10
+    python scripts/smoke_test_bridge.py --config config_example.json
+    python scripts/smoke_test_bridge.py --config config_example.json --max-n 10
 
 Runs the thin-lens synthesis, then builds + evaluates every candidate
-in optiland and prints a summary table.
+via the shared pipeline and prints a summary table.
 """
 
 from __future__ import annotations
@@ -16,20 +16,17 @@ import sys
 import time
 from pathlib import Path
 
+# Ensure the src directory is importable when running as a script
+_src = str((Path(__file__).resolve().parent.parent / "src"))
+if _src not in sys.path:
+    sys.path.insert(0, _src)
+
 from autoachromat.cli import load_inputs
 from autoachromat.glass_reader import load_catalog
 from autoachromat.cemented import run_cemented
 from autoachromat.spaced import run_spaced
-from autoachromat.optiland_bridge.builder import build_optic
-from autoachromat.optiland_bridge.evaluator import (
-    batch_evaluate,
-    OpticMetrics,
-)
-
-# Ensure the src directory is importable when running as a script
-_src = str(Path(__file__).resolve().parents[2])
-if _src not in sys.path:
-    sys.path.insert(0, _src)
+from autoachromat.pipeline import run_pipeline, PipelineResult
+from autoachromat.optiland_bridge.evaluator import OpticMetrics
 
 
 def _fmt(v, fmt=".4g") -> str:
@@ -131,11 +128,12 @@ def main() -> None:
         print("No candidates found – nothing to evaluate.")
         return
 
-    # ---- 3. Build + evaluate via optiland bridge (Stage A) ----
-    results = batch_evaluate(cands, inputs, stage="A", max_n=args.max_n)
+    # ---- 3. Build + evaluate via pipeline ----
+    pipeline_results = run_pipeline(cands, inputs, max_n=args.max_n)
+    metrics = [pr.metrics for pr in pipeline_results]
 
     # ---- 4. Print summary ----
-    print_summary(results)
+    print_summary(metrics)
 
 
 if __name__ == "__main__":

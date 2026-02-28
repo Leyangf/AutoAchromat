@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Literal
+from typing import Any, Optional, Literal
 
 SystemType = Literal["cemented", "spaced"]
 
@@ -30,9 +30,39 @@ class Inputs:
     # Type
     system_type: SystemType
 
+    # Spaced doublet air gap (mm); ignored for cemented
+    air_gap: float = 1.0
+
     # Numerical
     eps: float = 1e-12
     root_imag_tol: float = 1e-9
+
+    @classmethod
+    def with_defaults(cls, **overrides) -> "Inputs":
+        """Create an ``Inputs`` with sensible defaults, overriding any field.
+
+        Useful for tests and quick prototyping where only a few
+        parameters differ from the standard d-line configuration.
+
+        >>> inp = Inputs.with_defaults(fprime=100.0, system_type="spaced")
+        """
+        defaults: dict[str, Any] = dict(
+            lam0=0.58756,
+            lam1=0.48613,
+            lam2=0.65627,
+            D=50.0,
+            fprime=200.0,
+            C0=0.0,
+            P0=1.0,
+            W0=0.0,
+            min_delta_nu=10.0,
+            max_PE=100.0,
+            N=20,
+            system_type="cemented",
+            air_gap=1.0,
+        )
+        defaults.update(overrides)
+        return cls(**defaults)
 
 
 @dataclass
@@ -70,6 +100,12 @@ class Candidate:
     cost1: Optional[float] = None
     cost2: Optional[float] = None
 
+    # Glass dispersion data (for optiland builder)
+    formula_id1: Optional[int] = None
+    cd1: list[float] = field(default_factory=list)
+    formula_id2: Optional[int] = None
+    cd2: list[float] = field(default_factory=list)
+
     notes: dict = field(default_factory=dict)
 
 
@@ -82,12 +118,16 @@ class Candidate:
 class ElementRx:
     """Thick-lens prescription for a single element."""
 
-    R_front: float  # corrected front radius [mm]
-    R_back: float  # corrected back radius [mm]
+    R_front: float  # front radius [mm] (unchanged from thin-lens)
+    R_back: float  # back radius [mm] (unchanged from thin-lens)
     t_center: float  # center thickness [mm]
     t_edge: float  # edge thickness [mm]
     nd: float  # refractive index at design wavelength
     vd: float  # Abbe number
+
+    # Glass dispersion data (optional, for accurate ray tracing)
+    formula_id: Optional[int] = None
+    cd: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -104,3 +144,5 @@ class ThickPrescription:
     back_focus_guess: float  # initial back focal distance for image_solve [mm]
     D: float  # entrance pupil diameter [mm]
     wavelengths: tuple[float, float, float]  # (lam1, lam0, lam2) [µm]
+    actual_efl: float | None = None  # thick-lens EFL from ABCD [mm]
+    efl_deviation: float | None = None  # (actual - target) / target
