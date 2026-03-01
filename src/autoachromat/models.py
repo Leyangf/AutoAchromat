@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Literal
+from typing import Any, Optional, Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .thermal import ThermalMetrics
 
 SystemType = Literal["cemented", "spaced"]
 
@@ -36,6 +39,11 @@ class Inputs:
     # Numerical
     eps: float = 1e-12
     root_imag_tol: float = 1e-9
+
+    # Thermal analysis
+    T_ref: float = 20.0                   # reference temperature [°C]
+    T_delta: float = 20.0                 # ΔT for thermal defocus estimate [K]
+    alpha_housing: Optional[float] = None # actual housing CTE [1/K]; None = report only
 
     @classmethod
     def with_defaults(cls, **overrides) -> "Inputs":
@@ -107,6 +115,9 @@ class Candidate:
     cd2: list[float] = field(default_factory=list)
 
     notes: dict = field(default_factory=dict)
+
+    # Thermal analysis result (None when glass lacks TD/ED data)
+    thermal: Optional["ThermalMetrics"] = None
 
 
 # ---------------------------------------------------------------------------

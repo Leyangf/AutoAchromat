@@ -108,6 +108,14 @@ class TestToDictKeyStability:
         "glass2",
         "build_time_ms",
         "eval_time_ms",
+        # Thermal analysis keys
+        "thermal_available",
+        "dn_dT_1",
+        "dn_dT_2",
+        "V1_ppm_K",
+        "V2_ppm_K",
+        "dphi_dT_norm",
+        "alpha_housing_required_ppm_K",
     }
 
     def test_to_dict_has_required_keys_with_rx(self, sample_candidate, sample_rx):

@@ -12,6 +12,7 @@ from .optics import (
     check_min_radius,
     prepare_glass_data,
 )
+from .thermal import compute_thermal_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,11 @@ def run_spaced(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
                     if PE > inputs.max_PE:
                         continue
 
+                    thermal = compute_thermal_metrics(
+                        g1, g2, n1, n2, phi1, phi2,
+                        wavelength_um=inputs.lam0,
+                    )
+
                     out.append(
                         Candidate(
                             system_type="spaced",
@@ -199,6 +205,7 @@ def run_spaced(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
                             formula_id2=g2.formula_id,
                             cd2=list(g2.cd),
                             notes={"C_const_used": Cc},
+                            thermal=thermal,
                         )
                     )
                 except (ValueError, ZeroDivisionError) as exc:

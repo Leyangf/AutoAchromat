@@ -11,6 +11,7 @@ from .optics import (
     check_min_radius,
     prepare_glass_data,
 )
+from .thermal import compute_thermal_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,11 @@ def run_cemented(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
                     if PE > inputs.max_PE:
                         continue
 
+                    thermal = compute_thermal_metrics(
+                        g1, g2, n1, n2, phi1, phi2,
+                        wavelength_um=inputs.lam0,
+                    )
+
                     cand = Candidate(
                         system_type="cemented",
                         glass1=g1.name,
@@ -143,6 +149,7 @@ def run_cemented(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
                         cd1=list(g1.cd),
                         formula_id2=g2.formula_id,
                         cd2=list(g2.cd),
+                        thermal=thermal,
                     )
                 except (ValueError, ZeroDivisionError) as exc:
                     logger.debug(
