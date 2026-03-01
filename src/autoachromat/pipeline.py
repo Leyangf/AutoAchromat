@@ -61,6 +61,27 @@ class PipelineResult:
             d["actual_efl"] = None
             d["efl_deviation"] = None
 
+        # Thermal metrics (computed at thin-lens synthesis stage)
+        th = self.candidate.thermal
+        if th is not None:
+            d["thermal_available"] = th.thermal_data_available
+            d["dn_dT_1"] = th.dn_dT_1
+            d["dn_dT_2"] = th.dn_dT_2
+            d["V1_ppm_K"] = th.V1 * 1e6 if th.V1 is not None else None
+            d["V2_ppm_K"] = th.V2 * 1e6 if th.V2 is not None else None
+            d["dphi_dT_norm"] = th.dphi_dT_norm
+            d["alpha_housing_required_ppm_K"] = (
+                th.alpha_housing_required * 1e6
+                if th.alpha_housing_required is not None else None
+            )
+        else:
+            for k in [
+                "thermal_available", "dn_dT_1", "dn_dT_2",
+                "V1_ppm_K", "V2_ppm_K", "dphi_dT_norm",
+                "alpha_housing_required_ppm_K",
+            ]:
+                d[k] = None
+
         return d
 
 

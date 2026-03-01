@@ -315,6 +315,7 @@ class AutoAchromatGUI(tk.Tk):
         ("LchC", "lchc", 70, tk.E),
         ("TchC", "tchc", 70, tk.E),
         ("PE", "pe", 60, tk.E),
+        ("α_h [ppm/K]", "alpha_h", 85, tk.E),
         ("ms", "time", 55, tk.E),
     ]
 
@@ -573,6 +574,13 @@ class AutoAchromatGUI(tk.Tk):
         total_ms = m.build_time_ms + m.eval_time_ms
         tp = "Cem" if row.cand.system_type == "cemented" else "Sp"
 
+        th = row.cand.thermal
+        alpha_h = (
+            _fmt(th.alpha_housing_required * 1e6, ".1f")
+            if th is not None and th.alpha_housing_required is not None
+            else "—"
+        )
+
         return (
             row.idx + 1,
             f"{row.cand.catalog1}:{row.cand.glass1}",
@@ -589,6 +597,7 @@ class AutoAchromatGUI(tk.Tk):
             _fmt(m.LchC, ".3f"),
             _fmt(m.TchC, ".3f"),
             _fmt(m.PE, ".2f"),
+            alpha_h,
             f"{total_ms:.0f}",
         )
 
@@ -638,6 +647,11 @@ class AutoAchromatGUI(tk.Tk):
         "lchc": lambda r: abs(r.metrics.LchC) if r.metrics.LchC is not None else 1e9,
         "tchc": lambda r: abs(r.metrics.TchC) if r.metrics.TchC is not None else 1e9,
         "pe": lambda r: abs(r.metrics.PE) if r.metrics.PE is not None else 1e9,
+        "alpha_h": lambda r: (
+            r.cand.thermal.alpha_housing_required
+            if r.cand.thermal is not None and r.cand.thermal.alpha_housing_required is not None
+            else 1e9
+        ),
         "time": lambda r: r.metrics.build_time_ms + r.metrics.eval_time_ms,
     }
 
@@ -820,6 +834,37 @@ class AutoAchromatGUI(tk.Tk):
             lines.append(f"  Outside dia φ: {rx.D:.1f} mm")
         else:
             lines.append("\n  (thickening failed)")
+
+        # Thermal analysis
+        th = cand.thermal
+        lines.append("")
+        lines.append("  Thermal Analysis")
+        lines.append("  ─────────────────────────")
+        if th is None or not th.thermal_data_available:
+            lines.append("  (no TD/ED data in catalog)")
+        else:
+            lines.append(
+                f"  dn/dT₁:  {_fmt(th.dn_dT_1, '.3e')} /K"
+                f"  ({cand.glass1})"
+            )
+            lines.append(
+                f"  dn/dT₂:  {_fmt(th.dn_dT_2, '.3e')} /K"
+                f"  ({cand.glass2})"
+            )
+            v1_ppm = th.V1 * 1e6 if th.V1 is not None else None
+            v2_ppm = th.V2 * 1e6 if th.V2 is not None else None
+            lines.append(f"  V₁:      {_fmt(v1_ppm, '.2f')} ppm/K")
+            lines.append(f"  V₂:      {_fmt(v2_ppm, '.2f')} ppm/K")
+            dphi_ppm = (
+                th.dphi_dT_norm * 1e6 if th.dphi_dT_norm is not None else None
+            )
+            lines.append(f"  dΦ/dT:   {_fmt(dphi_ppm, '.2f')} ppm/K")
+            alpha_ppm = (
+                th.alpha_housing_required * 1e6
+                if th.alpha_housing_required is not None
+                else None
+            )
+            lines.append(f"  α_h req: {_fmt(alpha_ppm, '.2f')} ppm/K")
 
         w.insert(tk.END, "\n".join(lines))
         w.configure(state=tk.DISABLED)

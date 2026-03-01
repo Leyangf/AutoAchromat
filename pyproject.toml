@@ -6,7 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "autoachromat"
 version = "0.0.0"
 requires-python = ">=3.10"
-dependencies = ["numpy"]
+dependencies = [
+    "numpy",
+    "optiland",
+]
 
 [project.scripts]
 autoachromat = "autoachromat.cli:main"
