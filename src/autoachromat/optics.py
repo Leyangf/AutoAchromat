@@ -191,8 +191,14 @@ def achromat_power(nu1: float, nu2: float, C0: float) -> tuple[float, float]:
     return phi1, phi2
 
 
-def check_min_radius(radii: tuple[float, ...], D: float) -> bool:
-    rmin = D / 2.0
+def check_min_radius(radii: tuple[float, ...], D: float, margin: float = 0.05) -> bool:
+    """Return True iff every radius satisfies |R| >= (D/2) * (1 + margin).
+
+    The default 5 % margin prevents near-hemispherical surfaces (|R| ≈ D/2)
+    that would produce a sharp point at the aperture edge and cause the sag
+    to span almost the full radius, forcing unrealistically thick elements.
+    """
+    rmin = D / 2.0 * (1.0 + margin)
     return all(abs(r) >= rmin for r in radii)
 
 

@@ -309,20 +309,11 @@ def correct_radii_for_thickness(
     return (R_front_new, R_back_new)
 
 
-def _reconcile_cemented_radius(
-    R_from_elem1: float,
-    R_from_elem2: float,
-) -> float:
-    """Weighted average of two corrections of the shared cemented surface."""
-    return (R_from_elem1 + R_from_elem2) / 2.0
-
-
 # ---------------------------------------------------------------------------
 # System EFL via ABCD (paraxial ray-transfer) matrix
 # ---------------------------------------------------------------------------
 
-_EFL_CORRECTION_ITER = 3  # outer EFL-correction rounds
-_EFL_TOL = 1e-9  # relative convergence tolerance
+_EFL_TOL = 1e-9  # relative convergence tolerance for EFL correction
 
 
 def _mat2_mul(
@@ -428,14 +419,6 @@ def _system_efl_spaced(
 # ---------------------------------------------------------------------------
 
 
-def _placeholder_air_gap(D: float) -> float:
-    """Air gap between two singlets (spaced doublet only).
-
-    Rule: max(D / 50, 0.5) mm.
-    """
-    return max(D / 50.0, 0.5)
-
-
 def _initial_back_focus(fprime: float) -> float:
     """Initial guess for the back focal distance before ``image_solve``.
 
@@ -450,44 +433,55 @@ def _initial_back_focus(fprime: float) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _round6(r: float) -> float:
-    """Round radius to 6 decimal places (optiland precision workaround)."""
-    if not math.isfinite(r):
-        return r
-    return round(r, 6)
-
-
 def thicken_cemented(
     cand: Candidate,
     inp: Inputs,
 ) -> ThickPrescription | None:
     """Compute a thick-lens prescription for a cemented doublet.
 
-    Assigns physical thicknesses to the thin-lens geometry **without**
-    modifying any radii.  This preserves the achromatic balance and
-    aberration correction from the thin-lens synthesis stage exactly.
-
-    The resulting EFL will deviate slightly from the target (~0.3-1%)
-    due to thick-lens effects.  The deviation is recorded in
-    ``actual_efl`` / ``efl_deviation`` for downstream reporting.
+    Assigns physical thicknesses and iteratively scales the radii so that
+    the thick-lens EFL matches the target ``inp.fprime``.  Scaling all three
+    radii by the same factor ``k = fprime / actual_efl`` preserves the
+    bending (shape factor Q) and the achromatic power split while correcting
+    for the EFL shortening caused by thick-lens effects.  ``_CORRECTION_ITER``
+    rounds are applied; the residual is reported in ``efl_deviation``.
 
     Returns ``None`` if any element has invalid geometry.
     """
+    # Mutable local copies of radii (corrected in-place across iterations)
     R1, R2, R3 = cand.radii[0], cand.radii[1], cand.radii[2]
 
-    # --- assign physical thicknesses (radii unchanged) ---
-    result1 = element_thickness(R1, R2, inp.D, cand.n1)
-    if result1 is None:
-        return None
-    t1, te1 = result1
+    t1 = te1 = t2 = te2 = 0.0
+    actual_efl: float = math.nan
 
-    result2 = element_thickness(R2, R3, inp.D, cand.n2)
-    if result2 is None:
-        return None
-    t2, te2 = result2
+    for _iter in range(_CORRECTION_ITER + 1):
+        # --- assign physical thicknesses ---
+        result1 = element_thickness(R1, R2, inp.D, cand.n1)
+        if result1 is None:
+            return None
+        t1, te1 = result1
 
-    # --- compute actual thick-lens EFL for reporting ---
-    actual_efl = _system_efl_cemented(R1, R2, R3, t1, t2, cand.n1, cand.n2)
+        result2 = element_thickness(R2, R3, inp.D, cand.n2)
+        if result2 is None:
+            return None
+        t2, te2 = result2
+
+        # --- actual thick-lens EFL ---
+        actual_efl = _system_efl_cemented(R1, R2, R3, t1, t2, cand.n1, cand.n2)
+
+        # --- EFL correction: scale all radii uniformly ---
+        if _iter < _CORRECTION_ITER:
+            if not math.isfinite(actual_efl) or abs(actual_efl) < 1e-9:
+                break
+            k = inp.fprime / actual_efl
+            if not math.isfinite(k) or k <= 0.0 or k > 5.0:
+                break  # pathological case – stop correcting
+            if abs(k - 1.0) < _EFL_TOL:
+                break  # converged
+            R1 *= k
+            R2 *= k
+            R3 *= k
+
     efl_dev = (
         (actual_efl - inp.fprime) / inp.fprime
         if math.isfinite(actual_efl) and abs(inp.fprime) > 1e-12
@@ -533,32 +527,73 @@ def thicken_spaced(
 ) -> ThickPrescription | None:
     """Compute a thick-lens prescription for an air-spaced doublet.
 
-    Assigns physical thicknesses to the thin-lens geometry **without**
-    modifying any radii.  This preserves the achromatic balance and
-    aberration correction from the thin-lens synthesis stage exactly.
+    Assigns physical thicknesses and iteratively scales the radii so that
+    the thick-lens EFL matches the target ``inp.fprime``.  Scaling all four
+    radii by the same factor ``k = fprime / actual_efl`` preserves the
+    bending (shape factors Q1, Q2) and the achromatic power split while
+    correcting the EFL shortening caused by thick-lens effects (typically
+    5–15 % for f/4 systems).  ``_CORRECTION_ITER`` rounds are applied; the
+    residual is reported in ``efl_deviation``.
 
-    The resulting EFL will deviate slightly from the target due to
-    thick-lens effects.  The deviation is recorded for reporting.
+    The air gap is intentionally NOT scaled: it is a user-specified design
+    constraint and the achromatic condition is only weakly sensitive to the
+    gap for air_gap « EFL.
 
     Returns ``None`` if any element has invalid geometry.
     """
     R1, R2 = cand.radii[0], cand.radii[1]
     R3, R4 = cand.radii[2], cand.radii[3]
     air_gap = inp.air_gap
+    a = inp.D / 2.0
 
-    # --- assign physical thicknesses (radii unchanged) ---
-    result1 = element_thickness(R1, R2, inp.D, cand.n1)
-    if result1 is None:
-        return None
-    t1, te1 = result1
+    t1 = te1 = t2 = te2 = 0.0
+    actual_efl: float = math.nan
 
-    result2 = element_thickness(R3, R4, inp.D, cand.n2)
-    if result2 is None:
-        return None
-    t2, te2 = result2
+    for _iter in range(_CORRECTION_ITER + 1):
+        # --- assign physical thicknesses ---
+        result1 = element_thickness(R1, R2, inp.D, cand.n1)
+        if result1 is None:
+            return None
+        t1, te1 = result1
 
-    # --- compute actual thick-lens EFL for reporting ---
-    actual_efl = _system_efl_spaced(R1, R2, R3, R4, t1, t2, air_gap, cand.n1, cand.n2)
+        result2 = element_thickness(R3, R4, inp.D, cand.n2)
+        if result2 is None:
+            return None
+        t2, te2 = result2
+
+        # --- Reject if inner surfaces physically overlap at the aperture edge ---
+        # No-overlap condition: air_gap + sag(R3, a) − sag(R2, a) ≥ 0
+        try:
+            sag_back1 = _sag(R2, a)
+            sag_front2 = _sag(R3, a)
+        except ValueError:
+            return None
+        edge_clearance = air_gap + sag_front2 - sag_back1
+        if edge_clearance < 0:
+            logger.debug(
+                "thicken_spaced rejected: inner surfaces overlap at aperture edge "
+                "(air_gap=%.4f, sag_R2=%.4f, sag_R3=%.4f, clearance=%.4f mm)",
+                air_gap, sag_back1, sag_front2, edge_clearance,
+            )
+            return None
+
+        # --- actual thick-lens EFL ---
+        actual_efl = _system_efl_spaced(R1, R2, R3, R4, t1, t2, air_gap, cand.n1, cand.n2)
+
+        # --- EFL correction: scale all radii uniformly ---
+        if _iter < _CORRECTION_ITER:
+            if not math.isfinite(actual_efl) or abs(actual_efl) < 1e-9:
+                break
+            k = inp.fprime / actual_efl
+            if not math.isfinite(k) or k <= 0.0 or k > 5.0:
+                break  # pathological – stop
+            if abs(k - 1.0) < _EFL_TOL:
+                break  # converged
+            R1 *= k
+            R2 *= k
+            R3 *= k
+            R4 *= k
+
     efl_dev = (
         (actual_efl - inp.fprime) / inp.fprime
         if math.isfinite(actual_efl) and abs(inp.fprime) > 1e-12

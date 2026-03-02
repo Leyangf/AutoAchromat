@@ -18,11 +18,23 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
+# Matplotlib – set non-interactive backend BEFORE any project import that
+# pulls in optiland (which itself imports matplotlib.pyplot at module level).
+# FigureCanvasTkAgg renders into a tkinter widget regardless of backend.
+# ---------------------------------------------------------------------------
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+# ---------------------------------------------------------------------------
 # Project imports
 # ---------------------------------------------------------------------------
 from .models import Candidate, Inputs, ThickPrescription
 from .pipeline import run_design, PipelineResult
 from .optiland_bridge.evaluator import OpticMetrics
+from .optiland_bridge.builder import build_optic_from_prescription
 
 
 # ---------------------------------------------------------------------------
@@ -85,14 +97,23 @@ class AutoAchromatGUI(tk.Tk):
         self.geometry("1280x820")
         self.minsize(960, 640)
 
-        # State
-        self._catalog_paths: list[str] = []
+        # State – auto-load SCHOTT catalog if present
+        _default_schott = (
+            Path(__file__).resolve().parent.parent.parent
+            / "data"
+            / "catalogs"
+            / "SCHOTT.AGF"
+        )
+        self._catalog_paths: list[str] = (
+            [str(_default_schott)] if _default_schott.is_file() else []
+        )
         self._results: list[ResultRow] = []
         self._running = False
         self._sort_col: str = "rms"
         self._sort_reverse: bool = False
 
         self._build_ui()
+        self._refresh_catalog_display()
 
     # ===================================================================
     # UI construction
@@ -106,12 +127,16 @@ class AutoAchromatGUI(tk.Tk):
         self._build_input_frame(top)
         self._build_control_frame(top)
 
-        # PanedWindow: Results table (top) + Detail panel (bottom)
-        pane = ttk.PanedWindow(self, orient=tk.VERTICAL)
-        pane.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        # PanedWindow: ③ Results | ④ Details | ⑤ Drawing  (equal weight)
+        self._main_pane = ttk.PanedWindow(self, orient=tk.VERTICAL)
+        self._main_pane.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
 
-        self._build_result_table(pane)
-        self._build_detail_panel(pane)
+        self._build_result_table(self._main_pane)
+        self._build_detail_panel(self._main_pane)
+        self._build_drawing_panel(self._main_pane)
+
+        # After first render, force equal sash positions
+        self.after(50, self._equalize_pane_heights)
 
     # ------------------------------------------------------------------
     # ① Input parameters
@@ -168,7 +193,7 @@ class AutoAchromatGUI(tk.Tk):
         )
 
         ttk.Label(frame, text="P₀:").grid(row=r, column=2, sticky=tk.E, **_PAD)
-        self._var_P0 = tk.DoubleVar(value=1.0)
+        self._var_P0 = tk.DoubleVar(value=0.0)
         ttk.Entry(frame, textvariable=self._var_P0, width=10).grid(
             row=r, column=3, **_PAD
         )
@@ -321,7 +346,7 @@ class AutoAchromatGUI(tk.Tk):
 
     def _build_result_table(self, parent: ttk.PanedWindow) -> None:
         frame = ttk.LabelFrame(self, text=" ③ Results ")
-        parent.add(frame, weight=3)
+        parent.add(frame, weight=1)
 
         col_ids = [c[1] for c in self._COLUMNS]
         self._tree = ttk.Treeview(
@@ -353,12 +378,11 @@ class AutoAchromatGUI(tk.Tk):
 
     def _build_detail_panel(self, parent: ttk.PanedWindow) -> None:
         frame = ttk.LabelFrame(self, text=" ④ Selected Design Details ")
-        parent.add(frame, weight=2)
+        parent.add(frame, weight=1)
 
         # Left: Prescription table
         left = ttk.LabelFrame(frame, text="Prescription")
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=2)
-
         self._detail_rx = tk.Text(
             left, height=10, width=45, font=("Consolas", 9), state=tk.DISABLED
         )
@@ -367,7 +391,6 @@ class AutoAchromatGUI(tk.Tk):
         # Middle: Aberrations
         mid = ttk.LabelFrame(frame, text="Aberrations")
         mid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=2)
-
         self._detail_ab = tk.Text(
             mid, height=10, width=35, font=("Consolas", 9), state=tk.DISABLED
         )
@@ -376,11 +399,27 @@ class AutoAchromatGUI(tk.Tk):
         # Right: Thickness / Radii comparison
         right = ttk.LabelFrame(frame, text="Thin → Thick Comparison")
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=2)
-
         self._detail_cmp = tk.Text(
             right, height=10, width=40, font=("Consolas", 9), state=tk.DISABLED
         )
         self._detail_cmp.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+    def _build_drawing_panel(self, parent: ttk.PanedWindow) -> None:
+        self._draw_frame = ttk.LabelFrame(self, text=" ⑤ 2D Optical Layout ")
+        parent.add(self._draw_frame, weight=1)
+        self._mpl_fig = None
+        self._mpl_canvas: Optional[FigureCanvasTkAgg] = None
+
+    def _equalize_pane_heights(self) -> None:
+        """Set equal initial heights for the three main panes."""
+        total = self._main_pane.winfo_height()
+        if total <= 1:
+            # Window not yet mapped; retry after a short delay
+            self.after(50, self._equalize_pane_heights)
+            return
+        third = total // 3
+        self._main_pane.sashpos(0, third)
+        self._main_pane.sashpos(1, 2 * third)
 
     # ===================================================================
     # Catalog management
@@ -431,7 +470,7 @@ class AutoAchromatGUI(tk.Tk):
         self._var_lam1.set(d.get("lam1", 0.48613))
         self._var_lam2.set(d.get("lam2", 0.65627))
         self._var_C0.set(d.get("C0", 0.0))
-        self._var_P0.set(d.get("P0", 1.0))
+        self._var_P0.set(d.get("P0", 0.0))
         self._var_W0.set(d.get("W0", 0.0))
         self._var_min_dnu.set(d.get("min_delta_nu", 10.0))
         self._var_max_PE.set(d.get("max_PE", 100.0))
@@ -649,7 +688,8 @@ class AutoAchromatGUI(tk.Tk):
         "pe": lambda r: abs(r.metrics.PE) if r.metrics.PE is not None else 1e9,
         "alpha_h": lambda r: (
             r.cand.thermal.alpha_housing_required
-            if r.cand.thermal is not None and r.cand.thermal.alpha_housing_required is not None
+            if r.cand.thermal is not None
+            and r.cand.thermal.alpha_housing_required is not None
             else 1e9
         ),
         "time": lambda r: r.metrics.build_time_ms + r.metrics.eval_time_ms,
@@ -690,11 +730,13 @@ class AutoAchromatGUI(tk.Tk):
             widget.configure(state=tk.NORMAL)
             widget.delete("1.0", tk.END)
             widget.configure(state=tk.DISABLED)
+        self._clear_drawing()
 
     def _fill_detail(self, row: ResultRow) -> None:
         self._fill_prescription(row)
         self._fill_aberrations(row)
         self._fill_comparison(row)
+        self._fill_drawing(row)
 
     def _fill_prescription(self, row: ResultRow) -> None:
         """Fill the Prescription text widget with surface table."""
@@ -843,21 +885,13 @@ class AutoAchromatGUI(tk.Tk):
         if th is None or not th.thermal_data_available:
             lines.append("  (no TD/ED data in catalog)")
         else:
-            lines.append(
-                f"  dn/dT₁:  {_fmt(th.dn_dT_1, '.3e')} /K"
-                f"  ({cand.glass1})"
-            )
-            lines.append(
-                f"  dn/dT₂:  {_fmt(th.dn_dT_2, '.3e')} /K"
-                f"  ({cand.glass2})"
-            )
+            lines.append(f"  dn/dT₁:  {_fmt(th.dn_dT_1, '.3e')} /K  ({cand.glass1})")
+            lines.append(f"  dn/dT₂:  {_fmt(th.dn_dT_2, '.3e')} /K  ({cand.glass2})")
             v1_ppm = th.V1 * 1e6 if th.V1 is not None else None
             v2_ppm = th.V2 * 1e6 if th.V2 is not None else None
             lines.append(f"  V₁:      {_fmt(v1_ppm, '.2f')} ppm/K")
             lines.append(f"  V₂:      {_fmt(v2_ppm, '.2f')} ppm/K")
-            dphi_ppm = (
-                th.dphi_dT_norm * 1e6 if th.dphi_dT_norm is not None else None
-            )
+            dphi_ppm = th.dphi_dT_norm * 1e6 if th.dphi_dT_norm is not None else None
             lines.append(f"  dΦ/dT:   {_fmt(dphi_ppm, '.2f')} ppm/K")
             alpha_ppm = (
                 th.alpha_housing_required * 1e6
@@ -868,6 +902,58 @@ class AutoAchromatGUI(tk.Tk):
 
         w.insert(tk.END, "\n".join(lines))
         w.configure(state=tk.DISABLED)
+
+    # ===================================================================
+    # 2D optical layout drawing
+    # ===================================================================
+
+    def _clear_drawing(self) -> None:
+        """Release current matplotlib figure and clear the drawing frame."""
+        if self._mpl_fig is not None:
+            plt.close(self._mpl_fig)
+            self._mpl_fig = None
+        self._mpl_canvas = None
+        for w in self._draw_frame.winfo_children():
+            w.destroy()
+
+    def _fill_drawing(self, row: ResultRow) -> None:
+        """Generate and embed the 2D optical layout for the selected design."""
+        self._clear_drawing()
+
+        if row.rx is None or not row.metrics.success:
+            ttk.Label(
+                self._draw_frame,
+                text="(no layout — evaluation failed)",
+                foreground="#999999",
+            ).pack(expand=True)
+            return
+
+        try:
+            op = build_optic_from_prescription(row.rx)
+            if op is None:
+                ttk.Label(
+                    self._draw_frame,
+                    text="(builder returned None)",
+                    foreground="#999999",
+                ).pack(expand=True)
+                return
+
+            fig, _ = op.draw(num_rays=5, figsize=(12, 3))
+            fig.tight_layout()
+            self._mpl_fig = fig
+
+            canvas = FigureCanvasTkAgg(fig, master=self._draw_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._mpl_canvas = canvas
+
+        except Exception as exc:
+            ttk.Label(
+                self._draw_frame,
+                text=f"Drawing error: {type(exc).__name__}: {exc}",
+                foreground="red",
+                wraplength=300,
+            ).pack(expand=True)
 
     # ===================================================================
     # Export

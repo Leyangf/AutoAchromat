@@ -41,9 +41,11 @@ class Inputs:
     root_imag_tol: float = 1e-9
 
     # Thermal analysis
-    T_ref: float = 20.0                   # reference temperature [°C]
-    T_delta: float = 20.0                 # ΔT for thermal defocus estimate [K]
-    alpha_housing: Optional[float] = None # actual housing CTE [1/K]; None = report only
+    T_ref: float = 20.0  # reference temperature [°C]
+    T_delta: float = 20.0  # ΔT for thermal defocus estimate [K]
+    alpha_housing: Optional[float] = (
+        None  # actual housing CTE [1/K]; None = report only
+    )
 
     @classmethod
     def with_defaults(cls, **overrides) -> "Inputs":
@@ -61,7 +63,7 @@ class Inputs:
             D=50.0,
             fprime=200.0,
             C0=0.0,
-            P0=1.0,
+            P0=0.0,
             W0=0.0,
             min_delta_nu=10.0,
             max_PE=100.0,
