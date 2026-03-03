@@ -70,7 +70,14 @@ def _radii(
 
 
 def _P2_and_PE(
-    inputs: Inputs, n1: float, n2: float, phi1: float, Q: float, W: float, R2: float
+    inputs: Inputs,
+    n1: float,
+    n2: float,
+    phi1: float,
+    Q: float,
+    W: float,
+    R2: float,
+    W0: float,
 ) -> Tuple[float, float]:
     # Your spec (encapsulated, easy to adjust later)
     u2 = Q * (1.0 - 1.0 / n1) + phi1
@@ -81,7 +88,7 @@ def _P2_and_PE(
         raise ZeroDivisionError("P2 denom too small")
 
     P2 = ((u3 - u2) / denom) ** 2 * (u3 / n2 - u2 / n1)
-    PE = (abs(P2) * (3.0 ** (abs(W)))) / (R2**2)
+    PE = (abs(P2) * (3.0 ** abs(W - W0))) / (R2**2)
     return P2, PE
 
 
@@ -117,7 +124,7 @@ def run_cemented(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
                     if not check_min_radius((R1, R2, R3), inputs.D):
                         continue
 
-                    P2, PE = _P2_and_PE(inputs, n1, n2, phi1, Q, W, R2)
+                    P2, PE = _P2_and_PE(inputs, n1, n2, phi1, Q, W, R2, inputs.W0)
                     if PE > inputs.max_PE:
                         continue
 
