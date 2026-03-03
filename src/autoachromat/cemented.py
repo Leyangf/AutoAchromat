@@ -73,8 +73,8 @@ def _P2_and_PE(
     inputs: Inputs, n1: float, n2: float, phi1: float, Q: float, W: float, R2: float
 ) -> Tuple[float, float]:
     # Your spec (encapsulated, easy to adjust later)
-    u2 = Q * (1.0 - 1.0 / n1 + phi1)
-    u3 = Q * (1.0 - 1.0 / n2 + phi1)
+    u2 = Q * (1.0 - 1.0 / n1) + phi1
+    u3 = Q * (1.0 - 1.0 / n2) + phi1
 
     denom = 1.0 / n2 - 1.0 / n1
     if abs(denom) < inputs.eps:
@@ -122,7 +122,12 @@ def run_cemented(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
                         continue
 
                     thermal = compute_thermal_metrics(
-                        g1, g2, n1, n2, phi1, phi2,
+                        g1,
+                        g2,
+                        n1,
+                        n2,
+                        phi1,
+                        phi2,
                         wavelength_um=inputs.lam0,
                     )
 
