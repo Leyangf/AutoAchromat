@@ -822,7 +822,7 @@ class AutoAchromatGUI(tk.Tk):
         lines.append("")
         lines.append("  First-order")
         lines.append("  ───────────────────────")
-        lines.append(f"  EFL: {_fmt(m.efl, '.3f')} mm")
+        lines.append(f"  EFL (optiland): {_fmt(m.efl, '.3f')} mm")
         lines.append(f"  FNO: {_fmt(m.fno, '.4f')}")
         lines.append(f"  BFD: {_fmt(m.bfd, '.3f')} mm")
         rx = row.rx
@@ -831,9 +831,9 @@ class AutoAchromatGUI(tk.Tk):
             lines.append("")
             lines.append("  Thick-lens EFL (ABCD)")
             lines.append("  ───────────────────────")
-            lines.append(f"  EFL (thick):  {rx.actual_efl:.3f} mm")
-            lines.append(f"  EFL (target): {_fmt(m.efl, '.3f')} mm")
-            lines.append(f"  Deviation:    {dev_pct:+.3f} %")
+            lines.append(f"  EFL (ABCD):     {rx.actual_efl:.3f} mm")
+            lines.append(f"  EFL (optiland): {_fmt(m.efl, '.3f')} mm")
+            lines.append(f"  Deviation:      {dev_pct:+.3f} %")
 
         w.insert(tk.END, "\n".join(lines))
         w.configure(state=tk.DISABLED)

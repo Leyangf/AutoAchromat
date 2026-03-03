@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 _MIN_CENTER_ABSOLUTE = 0.5  # mm – always enforced (any lens)
 _SAG_MARGIN = 1e-6  # mm – reject if |R| < a + margin
-_CORRECTION_ITER = 2  # thickness → radii → re-thickness (2 rounds)
+_CORRECTION_ITER = 4  # thickness → radii → re-thickness (2 rounds)
 _SCALE_EPS = 1e-12  # treat B_prod ≈ 0 as no correction needed
 
 # ---------------------------------------------------------------------------
@@ -573,12 +573,17 @@ def thicken_spaced(
             logger.debug(
                 "thicken_spaced rejected: inner surfaces overlap at aperture edge "
                 "(air_gap=%.4f, sag_R2=%.4f, sag_R3=%.4f, clearance=%.4f mm)",
-                air_gap, sag_back1, sag_front2, edge_clearance,
+                air_gap,
+                sag_back1,
+                sag_front2,
+                edge_clearance,
             )
             return None
 
         # --- actual thick-lens EFL ---
-        actual_efl = _system_efl_spaced(R1, R2, R3, R4, t1, t2, air_gap, cand.n1, cand.n2)
+        actual_efl = _system_efl_spaced(
+            R1, R2, R3, R4, t1, t2, air_gap, cand.n1, cand.n2
+        )
 
         # --- EFL correction: scale all radii uniformly ---
         if _iter < _CORRECTION_ITER:

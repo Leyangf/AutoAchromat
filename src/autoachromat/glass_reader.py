@@ -36,17 +36,17 @@ class Glass:
     dpgf: float | None = None
 
     # Thermal expansion (ED line, stored as ppm/K in AGF file)
-    cte_m40_20: float | None = None   # CTE -40 to +20°C [ppm/K]
-    cte_20_300: float | None = None   # CTE +20 to +300°C [ppm/K]
+    cte_m40_20: float | None = None  # CTE -40 to +20°C [ppm/K]
+    cte_20_300: float | None = None  # CTE +20 to +300°C [ppm/K]
 
     # Schott thermal dispersion constants (TD line)
-    td_D0: float | None = None    # [1/K]
-    td_D1: float | None = None    # [1/K²]
-    td_D2: float | None = None    # [1/K³]
-    td_E0: float | None = None    # [µm²/K]
-    td_E1: float | None = None    # [µm²/K²]
-    td_ltk: float | None = None   # thermal knee wavelength [µm]
-    td_T_ref: float | None = None # reference temperature [°C]
+    td_D0: float | None = None  # [1/K]
+    td_D1: float | None = None  # [1/K²]
+    td_D2: float | None = None  # [1/K³]
+    td_E0: float | None = None  # [µm²/K]
+    td_E1: float | None = None  # [µm²/K²]
+    td_ltk: float | None = None  # thermal knee wavelength [µm]
+    td_T_ref: float | None = None  # reference temperature [°C]
 
     # OD line field
     relative_cost: float | None = None
@@ -175,20 +175,24 @@ def read_agf(path: str) -> tuple[str, list[Glass]]:
         elif tag == "ED" and current_glass is not None:
             # ED line: TCE(-40 to 20), TCE(20 to 300), density, dPgF, ignore_thermal_exp, ...
             if len(parts) > 1:
-                current_glass.cte_m40_20 = _parse_float(parts[1])   # ppm/K
+                current_glass.cte_m40_20 = _parse_float(parts[1])  # ppm/K
             if len(parts) > 2:
-                current_glass.cte_20_300 = _parse_float(parts[2])   # ppm/K
+                current_glass.cte_20_300 = _parse_float(parts[2])  # ppm/K
             # parts[3] = density (unused)
             if len(parts) > 4:
                 current_glass.dpgf = _parse_float(parts[4])
 
         elif tag == "CD" and current_glass is not None:
-            # CD line: dispersion coefficients
+            # CD line: dispersion coefficients.
+            # IMPORTANT: positions are meaningful (K1,L1,K2,L2,... for
+            # Sellmeier).  A '_' placeholder means "unknown" — we store
+            # 0.0 to preserve positional alignment.  Glasses with missing
+            # coefficients will later produce wrong n(λ) and be rejected
+            # by the n-range sanity check in filter_glasses().
             coeffs: list[float] = []
             for val in parts[1:]:
                 parsed = _parse_float(val)
-                if parsed is not None:
-                    coeffs.append(parsed)
+                coeffs.append(parsed if parsed is not None else 0.0)
             current_glass.cd = coeffs
 
         elif tag == "LD" and current_glass is not None:
@@ -209,13 +213,20 @@ def read_agf(path: str) -> tuple[str, list[Glass]]:
 
         elif tag == "TD" and current_glass is not None:
             # TD line: D0 D1 D2 E0 E1 lambda_tk T_ref
-            if len(parts) > 1: current_glass.td_D0    = _parse_float(parts[1])
-            if len(parts) > 2: current_glass.td_D1    = _parse_float(parts[2])
-            if len(parts) > 3: current_glass.td_D2    = _parse_float(parts[3])
-            if len(parts) > 4: current_glass.td_E0    = _parse_float(parts[4])
-            if len(parts) > 5: current_glass.td_E1    = _parse_float(parts[5])
-            if len(parts) > 6: current_glass.td_ltk   = _parse_float(parts[6])
-            if len(parts) > 7: current_glass.td_T_ref = _parse_float(parts[7])
+            if len(parts) > 1:
+                current_glass.td_D0 = _parse_float(parts[1])
+            if len(parts) > 2:
+                current_glass.td_D1 = _parse_float(parts[2])
+            if len(parts) > 3:
+                current_glass.td_D2 = _parse_float(parts[3])
+            if len(parts) > 4:
+                current_glass.td_E0 = _parse_float(parts[4])
+            if len(parts) > 5:
+                current_glass.td_E1 = _parse_float(parts[5])
+            if len(parts) > 6:
+                current_glass.td_ltk = _parse_float(parts[6])
+            if len(parts) > 7:
+                current_glass.td_T_ref = _parse_float(parts[7])
 
         # Ignore other tags: GC, IT, BD, MD, etc.
 

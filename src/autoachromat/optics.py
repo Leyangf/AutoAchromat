@@ -168,8 +168,14 @@ def filter_glasses(glasses: list[Glass], cfg: Config) -> list[Glass]:
             continue
 
         try:
-            _ = refractive_index(glass, cfg.lam0)
+            n = refractive_index(glass, cfg.lam0)
         except (ValueError, ZeroDivisionError):
+            continue
+
+        # Sanity check: real optical glasses have 1.3 < n < 2.6.
+        # Values outside this range indicate corrupted or missing
+        # dispersion coefficients (e.g. positional shift in CD line).
+        if not (1.3 < n < 2.6):
             continue
 
         filtered.append(glass)
