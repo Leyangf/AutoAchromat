@@ -341,7 +341,8 @@ class AutoAchromatGUI(tk.Tk):
         ("TchC", "tchc", 70, tk.E),
         ("PE", "pe", 60, tk.E),
         ("α_h [ppm/K]", "alpha_h", 85, tk.E),
-        ("ms", "time", 55, tk.E),
+        ("Cost1", "cost1", 55, tk.E),
+        ("Cost2", "cost2", 55, tk.E),
     ]
 
     def _build_result_table(self, parent: ttk.PanedWindow) -> None:
@@ -610,7 +611,6 @@ class AutoAchromatGUI(tk.Tk):
         t1 = _fmt(rx.elements[0].t_center, ".2f") if rx else "—"
         t2 = _fmt(rx.elements[1].t_center, ".2f") if rx else "—"
         gap = _fmt(rx.air_gap, ".2f") if rx and rx.air_gap is not None else "—"
-        total_ms = m.build_time_ms + m.eval_time_ms
         tp = "Cem" if row.cand.system_type == "cemented" else "Sp"
 
         th = row.cand.thermal
@@ -637,7 +637,8 @@ class AutoAchromatGUI(tk.Tk):
             _fmt(m.TchC, ".3f"),
             _fmt(m.PE, ".2f"),
             alpha_h,
-            f"{total_ms:.0f}",
+            _fmt(row.cand.cost1, ".2f"),
+            _fmt(row.cand.cost2, ".2f"),
         )
 
     def _insert_tree_row(self, row: ResultRow) -> None:
@@ -692,7 +693,8 @@ class AutoAchromatGUI(tk.Tk):
             and r.cand.thermal.alpha_housing_required is not None
             else 1e9
         ),
-        "time": lambda r: r.metrics.build_time_ms + r.metrics.eval_time_ms,
+        "cost1": lambda r: r.cand.cost1 if r.cand.cost1 is not None else 1e9,
+        "cost2": lambda r: r.cand.cost2 if r.cand.cost2 is not None else 1e9,
     }
 
     def _on_sort(self, col: str) -> None:

@@ -58,33 +58,23 @@ def _coeffs(n1: float, n2: float, phi1: float, phi2: float) -> dict:
     A2 = (phi2**3) * (1.0 + 2.0 / n2)
     B2 = (phi2**3) * (3.0 / (n2 - 1.0)) - 4.0 * phi1 * (phi2**2) * (1.0 + 1.0 / n2)
 
+    C = (
+        (phi1**3) * (n1 / ((n1 - 1.0) ** 2))
+        + (phi2**3) * (n2 / ((n2 - 1.0) ** 2))
+        - (phi1 * (phi2**2)) * ((4.0 / (n2 - 1.0)) + 1.0)
+        + ((phi1**2) * phi2) * (3.0 + (2.0 / n2))
+    )
+
     K1 = (phi1**2) * (1.0 + 1.0 / n1)
     K2 = (phi2**2) * (1.0 + 1.0 / n2)
 
     L = (
         (phi1**2) * (1.0 / (n1 - 1.0))
         + (phi2**2) * (1.0 / (n2 - 1.0))
-        + phi1 * phi2 * (2.0 + 1.0 / n2)
+        - phi1 * phi2 * (2.0 + 1.0 / n2)
     )
 
-    return dict(A1=A1, B1=B1, A2=A2, B2=B2, K1=K1, K2=K2, L=L)
-
-
-def _C_const(n1: float, n2: float, phi1: float, phi2: float) -> float:
-    """
-    User-provided spaced constant term:
-
-    C = φ1^3 * n1/(n1-1)^2
-      + φ2^3 * n2/(n2-1)^2
-      - φ1 φ2^2 * ( 4/(n2-1) + 1 )
-      + φ1^2 φ2 * ( 3 + 2/n2 )
-    """
-    return (
-        (phi1**3) * (n1 / ((n1 - 1.0) ** 2))
-        + (phi2**3) * (n2 / ((n2 - 1.0) ** 2))
-        - (phi1 * (phi2**2)) * ((4.0 / (n2 - 1.0)) + 1.0)
-        + ((phi1**2) * phi2) * (3.0 + (2.0 / n2))
-    )
+    return dict(A1=A1, B1=B1, A2=A2, B2=B2, C=C, K1=K1, K2=K2, L=L)
 
 
 # ---------------------------------------------------------------------------
@@ -92,9 +82,7 @@ def _C_const(n1: float, n2: float, phi1: float, phi2: float) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _solve_Q_pairs(
-    inputs: Inputs, c: dict, C_const: float
-) -> List[Tuple[float, float]]:
+def _solve_Q_pairs(inputs: Inputs, c: dict) -> List[Tuple[float, float]]:
     """Return up to 2 (Q1, Q2) pairs that minimise spherical aberration on
     the coma-zero line  K1·Q1 + K2·Q2 + (L − W0) = 0.
 
@@ -103,8 +91,15 @@ def _solve_Q_pairs(
     geometrically forbidden zone (inner-surface overlap); in that case the
     coma-line sweep (``_sweep_Q1_coma_line``) finds the nearest valid design.
     """
-    A1, B1, A2, B2, K1, K2, L = (
-        c["A1"], c["B1"], c["A2"], c["B2"], c["K1"], c["K2"], c["L"],
+    A1, B1, A2, B2, C, K1, K2, L = (
+        c["A1"],
+        c["B1"],
+        c["A2"],
+        c["B2"],
+        c["C"],
+        c["K1"],
+        c["K2"],
+        c["L"],
     )
 
     if abs(K2) < inputs.eps:
@@ -117,7 +112,7 @@ def _solve_Q_pairs(
     # Substitute → quadratic in Q1
     q2 = A1 + A2 * (a * a)
     q1 = B1 + A2 * (2.0 * a * b) + B2 * a
-    q0 = A2 * (b * b) + B2 * b + (C_const - inputs.P0)
+    q0 = A2 * (b * b) + B2 * b + (C - inputs.P0)
 
     roots = np.roots(np.array([q2, q1, q0], dtype=float))
 
@@ -135,7 +130,7 @@ def _solve_Q_pairs(
     return pairs
 
 
-def _seidel_SA_residual(c: dict, Cc: float, inputs: Inputs, Q1: float) -> float:
+def _seidel_SA_residual(c: dict, inputs: Inputs, Q1: float) -> float:
     """Seidel spherical aberration residual on the coma-zero line.
 
     Returns  S_I(Q1) − P0  where S_I is the Seidel third-order SA coefficient
@@ -148,8 +143,15 @@ def _seidel_SA_residual(c: dict, Cc: float, inputs: Inputs, Q1: float) -> float:
     This is the correct ranking metric for spaced doublets – it replaces the
     ad-hoc per-surface P-sum used previously.
     """
-    A1, B1, A2, B2, K1, K2, L = (
-        c["A1"], c["B1"], c["A2"], c["B2"], c["K1"], c["K2"], c["L"],
+    A1, B1, A2, B2, C, K1, K2, L = (
+        c["A1"],
+        c["B1"],
+        c["A2"],
+        c["B2"],
+        c["C"],
+        c["K1"],
+        c["K2"],
+        c["L"],
     )
     if abs(K2) < inputs.eps:
         return math.inf
@@ -157,14 +159,13 @@ def _seidel_SA_residual(c: dict, Cc: float, inputs: Inputs, Q1: float) -> float:
     b = (inputs.W0 - L) / K2
     q2 = A1 + A2 * (a * a)
     q1 = B1 + A2 * (2.0 * a * b) + B2 * a
-    q0 = A2 * (b * b) + B2 * b + (Cc - inputs.P0)
-    return q2 * Q1 ** 2 + q1 * Q1 + q0
+    q0 = A2 * (b * b) + B2 * b + (C - inputs.P0)
+    return q2 * Q1**2 + q1 * Q1 + q0
 
 
 def _sweep_Q1_coma_line(
     inputs: Inputs,
     c: dict,
-    Cc: float,
     n1: float,
     n2: float,
     phi1: float,
@@ -187,7 +188,7 @@ def _sweep_Q1_coma_line(
     """
     K1 = c["K1"]
     K2 = c["K2"]
-    L  = c["L"]
+    L = c["L"]
 
     if abs(K2) < inputs.eps:
         return []
@@ -196,10 +197,10 @@ def _sweep_Q1_coma_line(
     b_coma = (inputs.W0 - L) / K2
     semi_ap = inputs.D / 2.0
 
-    best_SI: float = math.inf   # minimum |S_I residual| seen so far
+    best_SI: float = math.inf  # minimum |S_I residual| seen so far
     best_pair: Tuple[float, float] | None = None
-    low_pair:  Tuple[float, float] | None = None   # most negative valid Q1
-    high_pair: Tuple[float, float] | None = None   # most positive valid Q1
+    low_pair: Tuple[float, float] | None = None  # most negative valid Q1
+    high_pair: Tuple[float, float] | None = None  # most positive valid Q1
 
     for Q1 in np.linspace(-3.0, 3.0, _Q1_SWEEP_N):
         Q2 = a_coma * Q1 + b_coma
@@ -220,7 +221,7 @@ def _sweep_Q1_coma_line(
         if inputs.air_gap + sag_R3 - sag_R2 < 0.0:
             continue
 
-        SI_resid = abs(_seidel_SA_residual(c, Cc, inputs, Q1))
+        SI_resid = abs(_seidel_SA_residual(c, inputs, Q1))
 
         if SI_resid < best_SI:
             best_SI = SI_resid
@@ -263,8 +264,12 @@ def _radii(
     denom_R3 = n2 / (n2 - 1.0) + Q2
     denom_R4 = 1.0 + Q2
 
-    if (abs(denom_R1) < 1e-12 or abs(denom_R2) < 1e-12
-            or abs(denom_R3) < 1e-12 or abs(denom_R4) < 1e-12):
+    if (
+        abs(denom_R1) < 1e-12
+        or abs(denom_R2) < 1e-12
+        or abs(denom_R3) < 1e-12
+        or abs(denom_R4) < 1e-12
+    ):
         raise ZeroDivisionError("Degenerate Q value: denominator near zero")
 
     R1 = f1 / denom_R1
@@ -280,11 +285,11 @@ def _radii(
 
 
 def _Ps_and_PE(
-    n1: float, n2: float, phi1: float, Q1: float, Q2: float
+    n1: float, n2: float, phi1: float, phi2: float, Q1: float, Q2: float
 ) -> Tuple[List[float], float]:
     u1 = 0.0
     u2 = Q1 * (1.0 - 1.0 / n1)
-    u3 = phi1
+    u3 = phi1 / phi2
     u4 = phi1 + n2 + Q2 * (n2 - 1.0)
     u5 = 1.0
 
@@ -340,18 +345,17 @@ def run_spaced(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
             try:
                 phi1, phi2 = achromat_power(nu1, nu2, inputs.C0)
                 c = _coeffs(n1, n2, phi1, phi2)
-                Cc = _C_const(n1, n2, phi1, phi2)
             except (ValueError, ZeroDivisionError):
                 continue
 
             # --- Collect (Q1, Q2) candidates from both sources ---
             try:
-                pairs_alg = _solve_Q_pairs(inputs, c, Cc)
+                pairs_alg = _solve_Q_pairs(inputs, c)
             except Exception:
                 pairs_alg = []
 
             try:
-                pairs_sweep = _sweep_Q1_coma_line(inputs, c, Cc, n1, n2, phi1, phi2)
+                pairs_sweep = _sweep_Q1_coma_line(inputs, c, n1, n2, phi1, phi2)
             except Exception:
                 pairs_sweep = []
 
@@ -359,7 +363,8 @@ def run_spaced(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
             # algebraic Q1 (the algebraic solution is already the min-SA point).
             alg_Q1s = [p[0] for p in pairs_alg]
             deduped_sweep = [
-                (Q1, Q2) for (Q1, Q2) in pairs_sweep
+                (Q1, Q2)
+                for (Q1, Q2) in pairs_sweep
                 if all(abs(Q1 - aq1) > _Q1_DEDUP_TOL for aq1 in alg_Q1s)
             ]
 
@@ -375,13 +380,18 @@ def run_spaced(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
                     if inputs.air_gap + _sag(R3, semi_ap) - _sag(R2, semi_ap) < 0.0:
                         continue
 
-                    Ps, _ = _Ps_and_PE(n1, n2, phi1, Q1, Q2)
-                    PE = abs(_seidel_SA_residual(c, Cc, inputs, Q1))
+                    Ps, _ = _Ps_and_PE(n1, n2, phi1, phi2, Q1, Q2)
+                    PE = abs(_seidel_SA_residual(c, inputs, Q1))
                     if PE > inputs.max_PE:
                         continue
 
                     thermal = compute_thermal_metrics(
-                        g1, g2, n1, n2, phi1, phi2,
+                        g1,
+                        g2,
+                        n1,
+                        n2,
+                        phi1,
+                        phi2,
                         wavelength_um=inputs.lam0,
                     )
 
@@ -409,14 +419,18 @@ def run_spaced(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
                             cd1=list(g1.cd),
                             formula_id2=g2.formula_id,
                             cd2=list(g2.cd),
-                            notes={"C_const_used": Cc},
+                            notes={"C_const_used": c["C"]},
                             thermal=thermal,
                         )
                     )
                 except (ValueError, ZeroDivisionError) as exc:
                     logger.debug(
                         "Skipping candidate %s+%s Q1=%.4g Q2=%.4g – %s",
-                        g1.name, g2.name, Q1, Q2, exc,
+                        g1.name,
+                        g2.name,
+                        Q1,
+                        Q2,
+                        exc,
                     )
                     continue
 
