@@ -289,8 +289,8 @@ def _Ps_and_PE(
 ) -> Tuple[List[float], float]:
     u1 = 0.0
     u2 = Q1 * (1.0 - 1.0 / n1)
-    u3 = phi1 / phi2
-    u4 = phi1 + n2 + Q2 * (n2 - 1.0)
+    u3 = phi1
+    u4 = phi1 + Q2 * (1.0 - 1.0 / n2)
     u5 = 1.0
 
     P1 = ((u2 - u1) / (1.0 / n1 - 1.0)) ** 2 * (u2 / n1 - u1)
