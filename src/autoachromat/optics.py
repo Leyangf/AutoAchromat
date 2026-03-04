@@ -109,7 +109,15 @@ def refractive_index(glass: Glass, wavelength_um: float) -> float:
             n2 += cd[5] * lam2
 
     else:
-        # Default fallback: try Sellmeier 1 format
+        # Default fallback: try Sellmeier 1 format.
+        # formula_id 9–12 are not explicitly handled; if their coefficient
+        # layout differs from Sellmeier 1 this will silently return wrong n(λ).
+        logger.warning(
+            "Glass %s has unrecognised formula_id=%d; "
+            "falling back to Sellmeier 1 layout — verify catalog compatibility",
+            glass.name,
+            glass.formula_id,
+        )
         K1, L1, K2, L2, K3, L3 = cd[0], cd[1], cd[2], cd[3], cd[4], cd[5]
         n2 = (
             1.0

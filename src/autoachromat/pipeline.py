@@ -241,11 +241,7 @@ def run_design(
     """
     # Step 1: Load catalogs
     glasses = load_catalog(catalog_paths)
-    n_glasses = (
-        sum(len(v) for v in glasses.values())
-        if isinstance(glasses, dict)
-        else len(glasses)
-    )
+    n_glasses = len(glasses)
     logger.info("Loaded %d glasses from %d catalog(s)", n_glasses, len(catalog_paths))
 
     # Step 2: Thin-lens synthesis

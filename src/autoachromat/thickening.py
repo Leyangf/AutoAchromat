@@ -639,6 +639,34 @@ def thicken_spaced(
 
 
 # ---------------------------------------------------------------------------
+# Cemented surface reconciliation
+# ---------------------------------------------------------------------------
+
+
+def _reconcile_cemented_radius(r_from_elem1: float, r_from_elem2: float) -> float:
+    """Average the two independently-corrected values of the shared cemented surface.
+
+    When each element's radii are corrected independently (e.g. via
+    ``correct_radii_for_thickness``), the shared interface R₂ may end up with
+    slightly different values from each element's perspective.  This function
+    averages them to produce a single consistent radius for the cemented surface.
+
+    Parameters
+    ----------
+    r_from_elem1 :
+        R₂ as corrected from element 1's perspective.
+    r_from_elem2 :
+        R₂ as corrected from element 2's perspective.
+
+    Returns
+    -------
+    float
+        Arithmetic mean of the two radii.
+    """
+    return (r_from_elem1 + r_from_elem2) / 2.0
+
+
+# ---------------------------------------------------------------------------
 # Public dispatch
 # ---------------------------------------------------------------------------
 
