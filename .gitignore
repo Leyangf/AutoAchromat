@@ -36,6 +36,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Pipeline output (regenerated on each run)
+results.json
+
 # Environment variables
 .env
 *.env.local
