@@ -32,7 +32,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 # Project imports
 # ---------------------------------------------------------------------------
 from .models import Candidate, Inputs, ThickPrescription
-from .pipeline import run_design, PipelineResult
+from .pipeline import run_design, run_stage_b, PipelineResult
 from .optiland_bridge.evaluator import OpticMetrics
 from .optiland_bridge.builder import build_optic_from_prescription
 
@@ -62,11 +62,12 @@ def _fmt(v: Optional[float], fmt: str = ".4f") -> str:
 class ResultRow:
     """Bundles a PipelineResult with an index for display."""
 
-    __slots__ = ("result", "idx")
+    __slots__ = ("result", "idx", "stage")
 
-    def __init__(self, idx: int, result: PipelineResult):
+    def __init__(self, idx: int, result: PipelineResult, stage: str = "A"):
         self.idx = idx
         self.result = result
+        self.stage = stage
 
     @property
     def cand(self) -> Candidate:
@@ -285,9 +286,17 @@ class AutoAchromatGUI(tk.Tk):
         frame.pack(fill=tk.X, **_PAD)
 
         self._btn_run = ttk.Button(
-            frame, text=" ▶  Run Pipeline ", command=self._on_run
+            frame, text=" ▶  Stage A ", command=self._on_run
         )
         self._btn_run.pack(side=tk.LEFT, **_PAD)
+
+        self._btn_stage_b = ttk.Button(
+            frame,
+            text=" ⚡ Stage B: Optimize Top-N ",
+            command=self._on_stage_b,
+            state=tk.DISABLED,
+        )
+        self._btn_stage_b.pack(side=tk.LEFT, **_PAD)
 
         self._btn_load = ttk.Button(
             frame, text="Load Config", command=self._on_load_config
@@ -582,6 +591,76 @@ class AutoAchromatGUI(tk.Tk):
         if self._results:
             self._btn_export_json.configure(state=tk.NORMAL)
             self._btn_export_csv.configure(state=tk.NORMAL)
+            self._btn_stage_b.configure(state=tk.NORMAL)
+
+    # ------------------------------------------------------------------
+    # Stage B: thick-lens optimisation
+    # ------------------------------------------------------------------
+
+    def _on_stage_b(self) -> None:
+        if self._running:
+            return
+        stage_a = [r for r in self._results if r.stage == "A" and r.metrics.success]
+        if not stage_a:
+            messagebox.showwarning(
+                "No Results", "Run Stage A first to generate candidates."
+            )
+            return
+
+        self._running = True
+        self._btn_run.configure(state=tk.DISABLED)
+        self._btn_stage_b.configure(state=tk.DISABLED)
+
+        thread = threading.Thread(target=self._run_stage_b_bg, daemon=True)
+        thread.start()
+
+    def _run_stage_b_bg(self) -> None:
+        """Execute Stage B optimisation in a background thread."""
+        try:
+            inputs = self._make_inputs()
+            top_n = self._var_N.get()
+
+            stage_a_results = [r.result for r in self._results if r.stage == "A"]
+            total_b = [0]  # mutable for closure
+
+            def _on_progress(current: int, total: int, pr: PipelineResult) -> None:
+                total_b[0] = total
+                idx = len(self._results)
+                row = ResultRow(idx, pr, stage="B")
+                self._results.append(row)
+                self._insert_tree_row(row)
+                self._set_progress(current, total)
+                self._set_status(
+                    f"Stage B {current}/{total}: "
+                    f"{pr.candidate.glass1} + {pr.candidate.glass2} ..."
+                )
+
+            self._set_status(f"Stage B: optimising top-{top_n} candidates...")
+            results_b = run_stage_b(
+                stage_a_results,
+                inputs,
+                top_n=top_n,
+                on_progress=_on_progress,
+            )
+
+            n_ok = sum(1 for r in results_b if r.metrics.success)
+            self._set_status(
+                f"Stage B done — {n_ok}/{len(results_b)} optimised successfully"
+            )
+
+        except Exception as e:
+            self._set_status(f"Stage B ERROR: {e}")
+            self.after(
+                0, lambda err=e: messagebox.showerror("Stage B Error", str(err))
+            )
+
+        finally:
+            self.after(0, self._stage_b_done)
+
+    def _stage_b_done(self) -> None:
+        self._running = False
+        self._btn_run.configure(state=tk.NORMAL)
+        self._btn_stage_b.configure(state=tk.NORMAL)
 
     # ===================================================================
     # Thread-safe UI updates
@@ -612,6 +691,8 @@ class AutoAchromatGUI(tk.Tk):
         t2 = _fmt(rx.elements[1].t_center, ".2f") if rx else "—"
         gap = _fmt(rx.air_gap, ".2f") if rx and rx.air_gap is not None else "—"
         tp = "Cem" if row.cand.system_type == "cemented" else "Sp"
+        if row.stage == "B":
+            tp += "★"
 
         th = row.cand.thermal
         alpha_h = (

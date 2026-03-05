@@ -17,7 +17,13 @@ from .models import Candidate, Inputs, ThickPrescription
 from .cemented import run_cemented
 from .spaced import run_spaced
 from .thickening import thicken
-from .optiland_bridge.builder import build_optic_from_prescription
+from .optiland_bridge.builder import (
+    build_optic_from_prescription,
+    build_optic,
+    rx_from_optic,
+)
+from .optiland_bridge.builder import _build_from_prescription
+from .optiland_bridge.optimizer import optimize_optic
 from .optiland_bridge.evaluator import evaluate, OpticMetrics
 
 logger = logging.getLogger(__name__)
@@ -211,6 +217,180 @@ class DesignResult:
     results: list[PipelineResult]
     n_glasses: int
     synth_time_ms: float
+
+
+# ---------------------------------------------------------------------------
+# Stage B: optical-equivalence grouping + thick-lens optimisation
+# ---------------------------------------------------------------------------
+
+
+def _optical_fingerprint(c: Candidate) -> tuple:
+    """Group key: (n1, n2, ν1, ν2) rounded to optical tolerance.
+
+    Two candidates share a fingerprint when their glass properties are
+    within Δn < 0.001 and Δν < 0.5 — distinct brand names but identical
+    optical performance, so Stage B optimisation produces the same geometry.
+    """
+    return (round(c.n1, 3), round(c.n2, 3), round(c.nu1, 1), round(c.nu2, 1))
+
+
+def deduplicate_candidates(
+    candidates: list[Candidate],
+) -> dict[tuple, list[Candidate]]:
+    """Group candidates by optical equivalence.
+
+    Returns a dict mapping fingerprint → list of candidates.
+    Stage B optimisation runs once per key (shared geometry); thermal and
+    full-spectrum chromatic evaluation uses each candidate's own data.
+    """
+    groups: dict[tuple, list[Candidate]] = {}
+    for c in candidates:
+        key = _optical_fingerprint(c)
+        groups.setdefault(key, []).append(c)
+    return groups
+
+
+def process_candidate_stage_b(
+    cand: Candidate,
+    inputs: Inputs,
+) -> PipelineResult:
+    """Stage B: thicken → build → optimise → evaluate a single candidate.
+
+    Runs ``optimize_optic`` on the Stage-A starting design, then reads back
+    the optimised geometry via ``rx_from_optic`` so that ``PipelineResult.rx``
+    reflects the actual optimised surface parameters.  Falls back to the
+    Stage-A optic (and Stage-A rx) if optimisation fails.
+    """
+    t0 = time.perf_counter()
+
+    # -- Step 1: Thicken (Stage A starting prescription) --
+    try:
+        rx_a = thicken(cand, inputs)
+    except Exception as exc:
+        m = OpticMetrics(
+            glass1=cand.glass1, glass2=cand.glass2,
+            catalog1=cand.catalog1, catalog2=cand.catalog2,
+            system_type=cand.system_type, PE=cand.PE,
+            success=False,
+            error_msg=f"thickening error: {type(exc).__name__}: {exc}",
+            build_time_ms=(time.perf_counter() - t0) * 1000.0,
+        )
+        return PipelineResult(cand, None, m)
+
+    if rx_a is None:
+        m = OpticMetrics(
+            glass1=cand.glass1, glass2=cand.glass2,
+            catalog1=cand.catalog1, catalog2=cand.catalog2,
+            system_type=cand.system_type, PE=cand.PE,
+            success=False,
+            error_msg="thickening failed (geometry rejection)",
+            build_time_ms=(time.perf_counter() - t0) * 1000.0,
+        )
+        return PipelineResult(cand, None, m)
+
+    build_ms_start = time.perf_counter()
+
+    # -- Step 2: Build Stage-A optic --
+    op_a = _build_from_prescription(rx_a)
+    if op_a is None:
+        build_ms = (time.perf_counter() - build_ms_start) * 1000.0
+        m = OpticMetrics(
+            glass1=cand.glass1, glass2=cand.glass2,
+            catalog1=cand.catalog1, catalog2=cand.catalog2,
+            system_type=cand.system_type, PE=cand.PE,
+            success=False,
+            error_msg="build_optic (Stage A) returned None",
+            build_time_ms=build_ms,
+        )
+        return PipelineResult(cand, rx_a, m)
+
+    # -- Step 3: Optimise (Stage B) — fall back to Stage-A optic on failure --
+    op_b = optimize_optic(op_a, rx_a, inputs)
+    optimised = op_b is not None
+    if not optimised:
+        op_b = op_a  # fall back to Stage-A optic
+
+    build_ms = (time.perf_counter() - build_ms_start) * 1000.0
+
+    # -- Step 4: Read back optimised geometry → update prescription --
+    try:
+        rx_b = rx_from_optic(op_b, rx_a) if optimised else rx_a
+    except Exception:
+        rx_b = rx_a  # read-back failed; keep Stage-A prescription
+
+    # -- Step 5: Evaluate --
+    m = evaluate(op_b, cand, inputs)
+    m.build_time_ms = build_ms
+    return PipelineResult(cand, rx_b, m)
+
+
+def run_stage_b(
+    stage_a_results: list[PipelineResult],
+    inputs: Inputs,
+    *,
+    top_n: int = 10,
+    on_progress: Optional[Callable[[int, int, PipelineResult], None]] = None,
+) -> list[PipelineResult]:
+    """Run Stage B optimisation on the top-N Stage A results.
+
+    Groups successful Stage A results by optical fingerprint
+    ``(n1, n2, ν1, ν2)``, runs the optiland optimiser once per unique
+    optical group, then returns the optimised results sorted by RMS spot
+    radius.
+
+    Parameters
+    ----------
+    stage_a_results :
+        Stage A results in ranking order (e.g. from ``run_pipeline``).
+    inputs :
+        System specification.
+    top_n :
+        How many top Stage A candidates to promote to Stage B.
+    on_progress :
+        ``(current_1based, total, result)`` called after each optimisation.
+
+    Returns
+    -------
+    list[PipelineResult]
+        One entry per unique optical group (≤ top_n), sorted by
+        ``rms_spot_radius`` ascending.
+    """
+    successful = [r for r in stage_a_results if r.metrics.success]
+    todo = successful[:top_n]
+
+    if not todo:
+        logger.warning("run_stage_b: no successful Stage A results to optimise")
+        return []
+
+    # Deduplicate: keep only the best representative per optical group
+    groups: dict[tuple, PipelineResult] = {}
+    for r in todo:
+        key = _optical_fingerprint(r.candidate)
+        if key not in groups:
+            groups[key] = r  # first occurrence = highest Stage A rank
+
+    group_list = list(groups.values())
+    logger.info(
+        "Stage B: %d candidates → %d unique optical groups",
+        len(todo), len(group_list),
+    )
+
+    results_b: list[PipelineResult] = []
+    for i, stage_a_r in enumerate(group_list):
+        r_b = process_candidate_stage_b(stage_a_r.candidate, inputs)
+        results_b.append(r_b)
+        if on_progress is not None:
+            on_progress(i + 1, len(group_list), r_b)
+
+    results_b.sort(
+        key=lambda r: r.metrics.rms_spot_radius
+        if r.metrics.rms_spot_radius is not None
+        else float("inf")
+    )
+
+    n_ok = sum(1 for r in results_b if r.metrics.success)
+    logger.info("Stage B: %d/%d succeeded", n_ok, len(results_b))
+    return results_b
 
 
 def run_design(
