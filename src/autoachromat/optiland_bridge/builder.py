@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import logging
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
@@ -22,6 +23,7 @@ from ..models import Candidate, Inputs, ThickPrescription, ElementRx
 from ..optics import refractive_index
 from ..glass_reader import Glass
 from ..thickening import thicken
+from .optimizer import optimize_optic
 
 logger = logging.getLogger(__name__)
 
@@ -128,12 +130,16 @@ def build_optic(
         The constructed system, or *None* if the model could not be built
         (e.g. trace failure, degenerate radii).
     """
-    if stage == "B":
-        raise NotImplementedError("Stage B (thickened) not yet implemented")
-
     rx = thicken(candidate, inputs)
     if rx is None:
         return None
+
+    if stage == "B":
+        op_a = _build_from_prescription(rx)
+        if op_a is None:
+            return None
+        return optimize_optic(op_a, rx, inputs)
+
     return _build_from_prescription(rx)
 
 
@@ -146,6 +152,65 @@ def build_optic_from_prescription(
     ``thickening.thicken()`` and wants to avoid recomputing it.
     """
     return _build_from_prescription(rx)
+
+
+def rx_from_optic(
+    op: optic.Optic,
+    rx_template: ThickPrescription,
+) -> ThickPrescription:
+    """Read surface parameters back from an optimised optic.
+
+    Creates a new ``ThickPrescription`` by reading the current radii and
+    thicknesses from *op*'s ``surface_group``.  Glass properties (nd, vd,
+    formula_id, cd) are preserved from *rx_template*.  Edge thickness is
+    recomputed from sag geometry.
+
+    Used after Stage-B optimisation to ensure ``PipelineResult.rx`` reflects
+    the optimised geometry rather than the original Stage-A prescription.
+    """
+
+    def _get_t(surf_idx: int) -> float:
+        t = op.surface_group.surfaces[surf_idx].thickness
+        return float(np.asarray(t).ravel()[0])
+
+    def _get_R(surf_idx: int) -> float:
+        r = op.surface_group.radii[surf_idx]
+        return float(np.asarray(r).ravel()[0])
+
+    def _sag(R: float, a: float) -> float:
+        """Sag at semi-aperture *a*; returns 0 for flat/degenerate surface."""
+        if not math.isfinite(R) or abs(R) < 1e-12:
+            return 0.0
+        if abs(R) <= a + 1e-6:
+            return 0.0
+        return R - math.copysign(math.sqrt(R * R - a * a), R)
+
+    a = rx_template.D / 2.0
+
+    if rx_template.system_type == "cemented":
+        R1, R2, R3 = _get_R(1), _get_R(2), _get_R(3)
+        t1, t2 = _get_t(1), _get_t(2)
+        bfd = _get_t(3)
+        te1 = max(t1 - _sag(R1, a) + _sag(R2, a), 0.1)
+        te2 = max(t2 - _sag(R2, a) + _sag(R3, a), 0.1)
+        e1 = replace(rx_template.elements[0],
+                     R_front=R1, R_back=R2, t_center=t1, t_edge=te1)
+        e2 = replace(rx_template.elements[1],
+                     R_front=R2, R_back=R3, t_center=t2, t_edge=te2)
+        return replace(rx_template, elements=[e1, e2], back_focus_guess=bfd)
+
+    else:  # spaced
+        R1, R2, R3, R4 = _get_R(1), _get_R(2), _get_R(3), _get_R(4)
+        t1, gap, t2 = _get_t(1), _get_t(2), _get_t(3)
+        bfd = _get_t(4)
+        te1 = max(t1 - _sag(R1, a) + _sag(R2, a), 0.1)
+        te2 = max(t2 - _sag(R3, a) + _sag(R4, a), 0.1)
+        e1 = replace(rx_template.elements[0],
+                     R_front=R1, R_back=R2, t_center=t1, t_edge=te1)
+        e2 = replace(rx_template.elements[1],
+                     R_front=R3, R_back=R4, t_center=t2, t_edge=te2)
+        return replace(rx_template, elements=[e1, e2],
+                       air_gap=gap, back_focus_guess=bfd)
 
 
 # ---------------------------------------------------------------------------
