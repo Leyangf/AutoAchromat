@@ -1,6 +1,6 @@
 {
     "catalogs": [
-        "data/catalogs/SCHOTT.AGF"
+        "data/catalogs/OHARA.agf"
     ],
     "lam0": 0.58756,
     "lam1": 0.48613,

@@ -13,16 +13,57 @@ Supports two design modes:
 
 ## Requirements
 
-- Python ≥ 3.10
-- `numpy`, `optiland`
+- Python ≥ 3.10 (tested with 3.11)
+- `numpy`, `optiland` (≥ 0.5.8), `scipy`
 
 ## Installation
 
+### Option A: pip (recommended)
+
 ```bash
+git clone <repo-url>
+cd AutoAchromat
 pip install -e .
 ```
 
+This installs `numpy` and `optiland` (which pulls in `scipy`, `matplotlib`, `numba`, etc.).
+
+### Option B: conda
+
+```bash
+git clone <repo-url>
+cd AutoAchromat
+conda env create -f environment.yml
+conda activate autoachromat
+```
+
+## Glass Catalogs
+
+The repo ships with **OHARA** and **CDGM** catalogs in `data/catalogs/`. The Schott catalog (`SCHOTT.AGF`) is not included due to redistribution restrictions.
+
+To add Schott glasses:
+1. Obtain `SCHOTT.AGF` from your Zemax/OpticStudio installation (typically under `Glasscat/`) or from the [Schott website](https://www.schott.com)
+2. Copy it to `data/catalogs/SCHOTT.AGF`
+3. Select it in the GUI catalog browser or reference it in your config JSON
+
+The pipeline works with any combination of catalogs — you can run with OHARA or CDGM alone.
+
 ## Usage
+
+### GUI
+
+```bash
+autoachromat-gui
+```
+
+Tkinter desktop application providing:
+
+- **Input panel** — edit all optical parameters (f', D, wavelengths, C₀/P₀/W₀, constraints) and load/save JSON configs
+- **Catalog browser** — add/remove AGF catalog files
+- **One-click run** — executes the full pipeline (synthesis → thickening → build → evaluate) in a background thread with progress bar
+- **Sortable results table** — columns for glass pair, EFL, F/#, RMS/GEO spot, SA, LchC, TchC, PE, thermal α_h; click any header to sort
+- **Detail panel** — select a row to see full prescription, Seidel coefficients, thermal metrics, and 2D lens drawing
+- **Export** — save results as JSON or CSV
 
 ### CLI
 
@@ -39,21 +80,6 @@ autoachromat --config config_example.json --out results.json --max-n 50
 | `--max-n` | Max candidates to evaluate (default: config `N`) |
 | `--thin-only` | Skip thickening / ray tracing |
 
-### GUI
-
-```bash
-autoachromat-gui
-```
-
-Tkinter desktop application providing:
-
-- **Input panel** — edit all optical parameters (f', D, wavelengths, C₀/P₀/W₀, constraints) and load/save JSON configs
-- **Catalog browser** — add/remove AGF catalog files
-- **One-click run** — executes the full pipeline (synthesis → thickening → build → evaluate) in a background thread with progress bar
-- **Sortable results table** — columns for glass pair, EFL, F/#, RMS/GEO spot, SA, LchC, TchC, PE, build time; click any header to sort
-- **Detail panel** — select a row to see full thin-lens parameters, thick-lens prescription, all Seidel coefficients, and radii
-- **Export** — save results as JSON or CSV
-
 ## Config File
 
 See [config_example.json](config_example.json). Key fields:
@@ -69,6 +95,7 @@ See [config_example.json](config_example.json). Key fields:
 | `max_PE` | Maximum PE threshold |
 | `N` | Top-N candidates to keep (cemented) |
 | `system_type` | `"cemented"` or `"spaced"` |
+| `air_gap` | Air gap between elements [mm] (spaced only) |
 
 ## Pipeline
 
@@ -84,20 +111,30 @@ AGF files ──▶ glass_reader ──▶ filter ──▶ thin-lens synthesis 
 4. **Build** — translate thick prescription into optiland `Optic` (aperture, field, wavelengths, image solve)
 5. **Evaluate** — extract EFL, F/#, RMS/geometric spot radius, Seidel coefficients (SA, CC, AC, PC, DC), and chromatic aberrations (LchC, TchC)
 
+## Running Tests
+
+```bash
+pytest
+```
+
 ## Project Layout
 
 ```text
 src/autoachromat/
   models.py           # data structures: Inputs, Candidate, ElementRx, ThickPrescription
-  glass_reader.py     # AGF catalog parser (NM/CD/LD/ED/OD tags)
+  glass_reader.py     # AGF catalog parser (NM/CD/LD/ED/OD/TD tags)
   optics.py           # refractive index, Abbe number, achromat power split, radius checks
   cemented.py         # cemented doublet thin-lens solver
   spaced.py           # air-spaced doublet thin-lens solver
   thickening.py       # thin → thick lens conversion (sag, thickness tables, radius correction)
+  thermal.py          # thermal analysis: dn/dT, thermo-optical coefficients, housing CTE
+  pipeline.py         # unified thicken → build → evaluate pipeline
   cli.py              # CLI entry point
   gui.py              # Tkinter GUI
   optiland_bridge/
     builder.py        # ThickPrescription → optiland Optic
     evaluator.py      # ray tracing + aberration extraction → OpticMetrics
-data/catalogs/        # AGF glass catalog files
+data/catalogs/        # AGF glass catalog files (OHARA, CDGM; add SCHOTT manually)
+tests/                # pytest test suite
+config_example.json   # example configuration
 ```
