@@ -1,3 +1,0 @@
-[console_scripts]
-autoachromat = autoachromat.cli:main
-autoachromat-gui = autoachromat.gui:main
