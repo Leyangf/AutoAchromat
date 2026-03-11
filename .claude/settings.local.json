@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c \"from optiland.optic import Optic; help\\(Optic.draw\\)\")"
-    ]
-  }
-}
