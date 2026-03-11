@@ -29,6 +29,9 @@ htmlcov/
 *.swo
 *~
 
+# Local tool settings
+.claude/
+
 # Jupyter Notebook
 .ipynb_checkpoints/
 
@@ -42,3 +45,6 @@ results.json
 # Environment variables
 .env
 *.env.local
+
+# Reference papers (copyrighted, do not redistribute)
+reference paper/
