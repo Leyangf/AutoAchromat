@@ -516,6 +516,7 @@ def thicken_cemented(
         back_focus_guess=_initial_back_focus(inp.fprime),
         D=inp.D,
         wavelengths=(inp.lam1, inp.lam0, inp.lam2),
+        half_field_angle=inp.half_field_angle,
         actual_efl=actual_efl,
         efl_deviation=efl_dev,
     )
@@ -633,6 +634,7 @@ def thicken_spaced(
         back_focus_guess=_initial_back_focus(inp.fprime),
         D=inp.D,
         wavelengths=(inp.lam1, inp.lam0, inp.lam2),
+        half_field_angle=inp.half_field_angle,
         actual_efl=actual_efl,
         efl_deviation=efl_dev,
     )

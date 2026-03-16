@@ -32,7 +32,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 # Project imports
 # ---------------------------------------------------------------------------
 from .models import Candidate, Inputs, ThickPrescription
-from .pipeline import run_design, PipelineResult
+from .pipeline import run_design, run_stage_b, PipelineResult
 from .optiland_bridge.evaluator import OpticMetrics
 from .optiland_bridge.builder import build_optic_from_prescription
 
@@ -62,11 +62,12 @@ def _fmt(v: Optional[float], fmt: str = ".4f") -> str:
 class ResultRow:
     """Bundles a PipelineResult with an index for display."""
 
-    __slots__ = ("result", "idx")
+    __slots__ = ("result", "idx", "stage")
 
-    def __init__(self, idx: int, result: PipelineResult):
+    def __init__(self, idx: int, result: PipelineResult, stage: str = "A"):
         self.idx = idx
         self.result = result
+        self.stage = stage
 
     @property
     def cand(self) -> Candidate:
@@ -120,12 +121,20 @@ class AutoAchromatGUI(tk.Tk):
     # ===================================================================
 
     def _build_ui(self) -> None:
-        # Top frame: Input params + Controls
         top = ttk.Frame(self)
         top.pack(fill=tk.X, padx=8, pady=4)
 
-        self._build_input_frame(top)
-        self._build_control_frame(top)
+        self._build_global_frame(top)
+
+        # Stage A (left) and Stage B (right) — equal width
+        stage_row = ttk.Frame(top)
+        stage_row.pack(fill=tk.X, **_PAD)
+        stage_row.columnconfigure(0, weight=1)
+        stage_row.columnconfigure(1, weight=1)
+        self._build_stage_a_frame(stage_row)
+        self._build_stage_b_frame(stage_row)
+
+        self._build_status_bar(top)
 
         # PanedWindow: ③ Results | ④ Details | ⑤ Drawing  (equal weight)
         self._main_pane = ttk.PanedWindow(self, orient=tk.VERTICAL)
@@ -139,128 +148,70 @@ class AutoAchromatGUI(tk.Tk):
         self.after(50, self._equalize_pane_heights)
 
     # ------------------------------------------------------------------
-    # ① Input parameters
+    # Global parameters (row 0 of top area)
     # ------------------------------------------------------------------
 
-    def _build_input_frame(self, parent: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(parent, text=" ① Input Parameters ")
+    def _build_global_frame(self, parent: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(parent, text=" Global ")
         frame.pack(fill=tk.X, **_PAD)
 
-        # --- row 0: Optical ---
+        # Use uniform column weights so entries align
+        for c in (1, 3, 5, 7, 9):
+            frame.columnconfigure(c, weight=1, uniform="val")
+
         r = 0
         ttk.Label(frame, text="f' [mm]:").grid(row=r, column=0, sticky=tk.E, **_PAD)
         self._var_fprime = tk.DoubleVar(value=200.0)
-        ttk.Entry(frame, textvariable=self._var_fprime, width=10).grid(
-            row=r, column=1, **_PAD
+        ttk.Entry(frame, textvariable=self._var_fprime, width=9).grid(
+            row=r, column=1, sticky=tk.W, **_PAD
         )
-
         ttk.Label(frame, text="D [mm]:").grid(row=r, column=2, sticky=tk.E, **_PAD)
         self._var_D = tk.DoubleVar(value=50.0)
-        ttk.Entry(frame, textvariable=self._var_D, width=10).grid(
-            row=r, column=3, **_PAD
+        ttk.Entry(frame, textvariable=self._var_D, width=9).grid(
+            row=r, column=3, sticky=tk.W, **_PAD
         )
-
-        # Separator
-        ttk.Separator(frame, orient=tk.VERTICAL).grid(
-            row=0, column=4, rowspan=3, sticky="ns", padx=10
-        )
-
-        # --- Wavelengths ---
-        ttk.Label(frame, text="λ₀ [µm]:").grid(row=r, column=5, sticky=tk.E, **_PAD)
+        ttk.Label(frame, text="λ₀ [µm]:").grid(row=r, column=4, sticky=tk.E, **_PAD)
         self._var_lam0 = tk.DoubleVar(value=0.58756)
-        ttk.Entry(frame, textvariable=self._var_lam0, width=10).grid(
-            row=r, column=6, **_PAD
+        ttk.Entry(frame, textvariable=self._var_lam0, width=9).grid(
+            row=r, column=5, sticky=tk.W, **_PAD
         )
-
-        ttk.Label(frame, text="λ₁ [µm]:").grid(row=r, column=7, sticky=tk.E, **_PAD)
+        ttk.Label(frame, text="λ₁ [µm]:").grid(row=r, column=6, sticky=tk.E, **_PAD)
         self._var_lam1 = tk.DoubleVar(value=0.48613)
-        ttk.Entry(frame, textvariable=self._var_lam1, width=10).grid(
-            row=r, column=8, **_PAD
+        ttk.Entry(frame, textvariable=self._var_lam1, width=9).grid(
+            row=r, column=7, sticky=tk.W, **_PAD
         )
-
-        ttk.Label(frame, text="λ₂ [µm]:").grid(row=r, column=9, sticky=tk.E, **_PAD)
+        ttk.Label(frame, text="λ₂ [µm]:").grid(row=r, column=8, sticky=tk.E, **_PAD)
         self._var_lam2 = tk.DoubleVar(value=0.65627)
-        ttk.Entry(frame, textvariable=self._var_lam2, width=10).grid(
-            row=r, column=10, **_PAD
+        ttk.Entry(frame, textvariable=self._var_lam2, width=9).grid(
+            row=r, column=9, sticky=tk.W, **_PAD
         )
 
-        # --- row 1: Targets ---
         r = 1
-        ttk.Label(frame, text="C₀:").grid(row=r, column=0, sticky=tk.E, **_PAD)
-        self._var_C0 = tk.DoubleVar(value=0.0)
-        ttk.Entry(frame, textvariable=self._var_C0, width=10).grid(
-            row=r, column=1, **_PAD
-        )
-
-        ttk.Label(frame, text="P₀:").grid(row=r, column=2, sticky=tk.E, **_PAD)
-        self._var_P0 = tk.DoubleVar(value=0.0)
-        ttk.Entry(frame, textvariable=self._var_P0, width=10).grid(
-            row=r, column=3, **_PAD
-        )
-
-        ttk.Label(frame, text="W₀:").grid(row=r, column=5, sticky=tk.E, **_PAD)
-        self._var_W0 = tk.DoubleVar(value=0.0)
-        ttk.Entry(frame, textvariable=self._var_W0, width=10).grid(
-            row=r, column=6, **_PAD
-        )
-
-        ttk.Label(frame, text="Δν min:").grid(row=r, column=7, sticky=tk.E, **_PAD)
-        self._var_min_dnu = tk.DoubleVar(value=10.0)
-        ttk.Entry(frame, textvariable=self._var_min_dnu, width=10).grid(
-            row=r, column=8, **_PAD
-        )
-
-        ttk.Label(frame, text="PE max:").grid(row=r, column=9, sticky=tk.E, **_PAD)
-        self._var_max_PE = tk.DoubleVar(value=100.0)
-        ttk.Entry(frame, textvariable=self._var_max_PE, width=10).grid(
-            row=r, column=10, **_PAD
-        )
-
-        # --- row 2: Type + Top-N ---
-        r = 2
         ttk.Label(frame, text="Type:").grid(row=r, column=0, sticky=tk.E, **_PAD)
-        self._var_type = tk.StringVar(value="cemented")
         type_frame = ttk.Frame(frame)
         type_frame.grid(row=r, column=1, columnspan=3, sticky=tk.W, **_PAD)
+        self._var_type = tk.StringVar(value="cemented")
         ttk.Radiobutton(
-            type_frame,
-            text="Cemented",
-            variable=self._var_type,
-            value="cemented",
-            command=self._on_type_changed,
-        ).pack(side=tk.LEFT, padx=4)
+            type_frame, text="Cemented", variable=self._var_type,
+            value="cemented", command=self._on_type_changed,
+        ).pack(side=tk.LEFT, padx=2)
         ttk.Radiobutton(
-            type_frame,
-            text="Spaced",
-            variable=self._var_type,
-            value="spaced",
-            command=self._on_type_changed,
-        ).pack(side=tk.LEFT, padx=4)
+            type_frame, text="Spaced", variable=self._var_type,
+            value="spaced", command=self._on_type_changed,
+        ).pack(side=tk.LEFT, padx=2)
 
-        # Air gap (spaced only) — placed inside type_frame
-        ttk.Label(type_frame, text="  Air gap [mm]:").pack(side=tk.LEFT, padx=(12, 2))
-        self._var_air_gap = tk.DoubleVar(value=1.0)
-        self._ent_air_gap = ttk.Entry(
-            type_frame, textvariable=self._var_air_gap, width=8
-        )
-        self._ent_air_gap.pack(side=tk.LEFT, padx=2)
-        # Initially disabled (cemented selected by default)
-        self._ent_air_gap.configure(state=tk.DISABLED)
-
-        ttk.Label(frame, text="Top-N:").grid(row=r, column=5, sticky=tk.E, **_PAD)
+        ttk.Label(frame, text="Top-N:").grid(row=r, column=4, sticky=tk.E, **_PAD)
         self._var_N = tk.IntVar(value=20)
-        ttk.Entry(frame, textvariable=self._var_N, width=10).grid(
-            row=r, column=6, **_PAD
+        ttk.Entry(frame, textvariable=self._var_N, width=9).grid(
+            row=r, column=5, sticky=tk.W, **_PAD
         )
 
-        # --- Catalog list ---
-        ttk.Label(frame, text="Catalogs:").grid(row=r, column=7, sticky=tk.E, **_PAD)
+        ttk.Label(frame, text="Catalogs:").grid(row=r, column=6, sticky=tk.E, **_PAD)
         cat_frame = ttk.Frame(frame)
-        cat_frame.grid(row=r, column=8, columnspan=3, sticky=tk.W, **_PAD)
-
+        cat_frame.grid(row=r, column=7, columnspan=3, sticky=tk.W, **_PAD)
         self._var_cat_display = tk.StringVar(value="(none)")
         ttk.Label(
-            cat_frame, textvariable=self._var_cat_display, width=30, relief="sunken"
+            cat_frame, textvariable=self._var_cat_display, width=24, relief="sunken"
         ).pack(side=tk.LEFT)
         ttk.Button(cat_frame, text="+", width=3, command=self._add_catalog).pack(
             side=tk.LEFT, padx=2
@@ -268,57 +219,142 @@ class AutoAchromatGUI(tk.Tk):
         ttk.Button(cat_frame, text="−", width=3, command=self._clear_catalogs).pack(
             side=tk.LEFT, padx=2
         )
-
-    def _on_type_changed(self) -> None:
-        """Enable/disable air gap entry based on system type selection."""
-        if self._var_type.get() == "spaced":
-            self._ent_air_gap.configure(state=tk.NORMAL)
-        else:
-            self._ent_air_gap.configure(state=tk.DISABLED)
-
-    # ------------------------------------------------------------------
-    # ② Control bar
-    # ------------------------------------------------------------------
-
-    def _build_control_frame(self, parent: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(parent, text=" ② Control ")
-        frame.pack(fill=tk.X, **_PAD)
-
-        self._btn_run = ttk.Button(
-            frame, text=" ▶  Run Pipeline ", command=self._on_run
-        )
-        self._btn_run.pack(side=tk.LEFT, **_PAD)
-
         self._btn_load = ttk.Button(
-            frame, text="Load Config", command=self._on_load_config
+            cat_frame, text="Load", width=5, command=self._on_load_config
         )
-        self._btn_load.pack(side=tk.LEFT, **_PAD)
+        self._btn_load.pack(side=tk.LEFT, padx=(8, 2))
 
-        ttk.Separator(frame, orient=tk.VERTICAL).pack(
-            side=tk.LEFT, fill=tk.Y, padx=8, pady=2
+    # ------------------------------------------------------------------
+    # Stage A (left) and Stage B (right)
+    # ------------------------------------------------------------------
+
+    def _build_stage_a_frame(self, parent: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(parent, text=" Stage A: Thin-Lens Synthesis ")
+        frame.grid(row=0, column=0, sticky="nsew", **_PAD)
+
+        r = 0
+        ttk.Label(frame, text="C₀:").grid(row=r, column=0, sticky=tk.E, **_PAD)
+        self._var_C0 = tk.DoubleVar(value=0.0)
+        ttk.Entry(frame, textvariable=self._var_C0, width=8).grid(
+            row=r, column=1, sticky=tk.W, **_PAD
         )
+        ttk.Label(frame, text="P₀:").grid(row=r, column=2, sticky=tk.E, **_PAD)
+        self._var_P0 = tk.DoubleVar(value=0.0)
+        ttk.Entry(frame, textvariable=self._var_P0, width=8).grid(
+            row=r, column=3, sticky=tk.W, **_PAD
+        )
+        ttk.Label(frame, text="W₀:").grid(row=r, column=4, sticky=tk.E, **_PAD)
+        self._var_W0 = tk.DoubleVar(value=0.0)
+        ttk.Entry(frame, textvariable=self._var_W0, width=8).grid(
+            row=r, column=5, sticky=tk.W, **_PAD
+        )
+
+        r = 1
+        ttk.Label(frame, text="Δν min:").grid(row=r, column=0, sticky=tk.E, **_PAD)
+        self._var_min_dnu = tk.DoubleVar(value=10.0)
+        ttk.Entry(frame, textvariable=self._var_min_dnu, width=8).grid(
+            row=r, column=1, sticky=tk.W, **_PAD
+        )
+        ttk.Label(frame, text="PE max:").grid(row=r, column=2, sticky=tk.E, **_PAD)
+        self._var_max_PE = tk.DoubleVar(value=100.0)
+        ttk.Entry(frame, textvariable=self._var_max_PE, width=8).grid(
+            row=r, column=3, sticky=tk.W, **_PAD
+        )
+        ttk.Label(frame, text="Air gap [mm]:").grid(row=r, column=4, sticky=tk.E, **_PAD)
+        self._var_air_gap = tk.DoubleVar(value=1.0)
+        self._ent_air_gap = ttk.Entry(frame, textvariable=self._var_air_gap, width=8)
+        self._ent_air_gap.grid(row=r, column=5, sticky=tk.W, **_PAD)
+        self._ent_air_gap.configure(state=tk.DISABLED)
+        self._btn_run = ttk.Button(
+            frame, text=" ▶ Run Stage A ", command=self._on_run
+        )
+        self._btn_run.grid(row=r, column=6, sticky=tk.E, padx=6, pady=3)
+
+    def _build_stage_b_frame(self, parent: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(parent, text=" Stage B: Thick-Lens Optimisation (0 = auto) ")
+        frame.grid(row=0, column=1, sticky="nsew", **_PAD)
+
+        r = 0
+        ttk.Label(frame, text="Field [°]:").grid(row=r, column=0, sticky=tk.E, **_PAD)
+        self._var_half_field = tk.DoubleVar(value=1.0)
+        ttk.Entry(frame, textvariable=self._var_half_field, width=6).grid(
+            row=r, column=1, sticky=tk.W, **_PAD
+        )
+        ttk.Label(frame, text="Air gap [mm]:").grid(row=r, column=2, sticky=tk.E, **_PAD)
+        rng_gap = ttk.Frame(frame)
+        rng_gap.grid(row=r, column=3, sticky=tk.W, **_PAD)
+        self._var_gap_min = tk.DoubleVar(value=0.0)
+        self._ent_gap_min = ttk.Entry(rng_gap, textvariable=self._var_gap_min, width=5)
+        self._ent_gap_min.pack(side=tk.LEFT)
+        ttk.Label(rng_gap, text="–").pack(side=tk.LEFT, padx=2)
+        self._var_gap_max = tk.DoubleVar(value=0.0)
+        self._ent_gap_max = ttk.Entry(rng_gap, textvariable=self._var_gap_max, width=5)
+        self._ent_gap_max.pack(side=tk.LEFT)
+        self._ent_gap_min.configure(state=tk.DISABLED)
+        self._ent_gap_max.configure(state=tk.DISABLED)
+
+        r = 1
+        ttk.Label(frame, text="t₁ [mm]:").grid(row=r, column=0, sticky=tk.E, **_PAD)
+        rng1 = ttk.Frame(frame)
+        rng1.grid(row=r, column=1, sticky=tk.W, **_PAD)
+        self._var_t1_min = tk.DoubleVar(value=0.0)
+        ttk.Entry(rng1, textvariable=self._var_t1_min, width=5).pack(side=tk.LEFT)
+        ttk.Label(rng1, text="–").pack(side=tk.LEFT, padx=2)
+        self._var_t1_max = tk.DoubleVar(value=0.0)
+        ttk.Entry(rng1, textvariable=self._var_t1_max, width=5).pack(side=tk.LEFT)
+
+        ttk.Label(frame, text="t₂ [mm]:").grid(row=r, column=2, sticky=tk.E, **_PAD)
+        rng2 = ttk.Frame(frame)
+        rng2.grid(row=r, column=3, sticky=tk.W, **_PAD)
+        self._var_t2_min = tk.DoubleVar(value=0.0)
+        ttk.Entry(rng2, textvariable=self._var_t2_min, width=5).pack(side=tk.LEFT)
+        ttk.Label(rng2, text="–").pack(side=tk.LEFT, padx=2)
+        self._var_t2_max = tk.DoubleVar(value=0.0)
+        ttk.Entry(rng2, textvariable=self._var_t2_max, width=5).pack(side=tk.LEFT)
+
+        self._btn_stage_b = ttk.Button(
+            frame, text=" ⚡ Optimize Selected ",
+            command=self._on_stage_b, state=tk.DISABLED,
+        )
+        self._btn_stage_b.grid(row=r, column=4, sticky=tk.E, padx=6, pady=3)
+
+    # ------------------------------------------------------------------
+    # Status bar (below Stage A/B)
+    # ------------------------------------------------------------------
+
+    def _build_status_bar(self, parent: ttk.Frame) -> None:
+        bar = ttk.Frame(parent)
+        bar.pack(fill=tk.X, **_PAD)
 
         self._btn_export_json = ttk.Button(
-            frame, text="Export JSON", command=self._on_export_json, state=tk.DISABLED
+            bar, text="Export JSON", command=self._on_export_json, state=tk.DISABLED
         )
         self._btn_export_json.pack(side=tk.LEFT, **_PAD)
 
         self._btn_export_csv = ttk.Button(
-            frame, text="Export CSV", command=self._on_export_csv, state=tk.DISABLED
+            bar, text="Export CSV", command=self._on_export_csv, state=tk.DISABLED
         )
         self._btn_export_csv.pack(side=tk.LEFT, **_PAD)
 
-        ttk.Separator(frame, orient=tk.VERTICAL).pack(
+        ttk.Separator(bar, orient=tk.VERTICAL).pack(
             side=tk.LEFT, fill=tk.Y, padx=8, pady=2
         )
 
-        self._progress = ttk.Progressbar(frame, length=200, mode="determinate")
+        self._progress = ttk.Progressbar(bar, length=200, mode="determinate")
         self._progress.pack(side=tk.LEFT, **_PAD)
 
         self._var_status = tk.StringVar(value="Ready")
-        ttk.Label(frame, textvariable=self._var_status, width=60).pack(
-            side=tk.LEFT, **_PAD
+        ttk.Label(bar, textvariable=self._var_status).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, **_PAD
         )
+
+    def _on_type_changed(self) -> None:
+        """Enable/disable spaced-only fields based on system type."""
+        is_spaced = self._var_type.get() == "spaced"
+        state = tk.NORMAL if is_spaced else tk.DISABLED
+        self._ent_air_gap.configure(state=state)
+        self._ent_gap_min.configure(state=state)
+        self._ent_gap_max.configure(state=state)
 
     # ------------------------------------------------------------------
     # ③ Results table
@@ -351,7 +387,7 @@ class AutoAchromatGUI(tk.Tk):
 
         col_ids = [c[1] for c in self._COLUMNS]
         self._tree = ttk.Treeview(
-            frame, columns=col_ids, show="headings", selectmode="browse"
+            frame, columns=col_ids, show="headings", selectmode="extended"
         )
 
         for display, cid, width, anchor in self._COLUMNS:
@@ -478,6 +514,13 @@ class AutoAchromatGUI(tk.Tk):
         self._var_N.set(d.get("N", 20))
         self._var_type.set(d.get("system_type", "cemented"))
         self._var_air_gap.set(d.get("air_gap", 1.0))
+        self._var_half_field.set(d.get("half_field_angle", 1.0))
+        self._var_t1_min.set(d.get("t1_min", 0.0))
+        self._var_t1_max.set(d.get("t1_max", 0.0))
+        self._var_t2_min.set(d.get("t2_min", 0.0))
+        self._var_t2_max.set(d.get("t2_max", 0.0))
+        self._var_gap_min.set(d.get("gap_min", 0.0))
+        self._var_gap_max.set(d.get("gap_max", 0.0))
         self._on_type_changed()
 
         # Catalog paths (resolve relative to config dir)
@@ -511,6 +554,13 @@ class AutoAchromatGUI(tk.Tk):
             N=self._var_N.get(),
             system_type=self._var_type.get(),  # type: ignore[arg-type]
             air_gap=self._var_air_gap.get(),
+            half_field_angle=self._var_half_field.get(),
+            t1_min=self._var_t1_min.get(),
+            t1_max=self._var_t1_max.get(),
+            t2_min=self._var_t2_min.get(),
+            t2_max=self._var_t2_max.get(),
+            gap_min=self._var_gap_min.get(),
+            gap_max=self._var_gap_max.get(),
         )
 
     # ===================================================================
@@ -582,6 +632,96 @@ class AutoAchromatGUI(tk.Tk):
         if self._results:
             self._btn_export_json.configure(state=tk.NORMAL)
             self._btn_export_csv.configure(state=tk.NORMAL)
+            self._btn_stage_b.configure(state=tk.NORMAL)
+
+    # ------------------------------------------------------------------
+    # Stage B: thick-lens optimisation
+    # ------------------------------------------------------------------
+
+    def _on_stage_b(self) -> None:
+        if self._running:
+            return
+
+        # Get selected rows from the treeview
+        sel_iids = self._tree.selection()
+        if not sel_iids:
+            messagebox.showwarning(
+                "No Selection",
+                "Please select one or more rows in the results table to optimise.",
+            )
+            return
+
+        # Resolve selected indices to Stage-A ResultRows with successful metrics
+        selected_rows: list[ResultRow] = []
+        for iid in sel_iids:
+            try:
+                idx = int(iid)
+            except ValueError:
+                continue
+            row = next((r for r in self._results if r.idx == idx), None)
+            if row is not None and row.stage == "A" and row.metrics.success:
+                selected_rows.append(row)
+
+        if not selected_rows:
+            messagebox.showwarning(
+                "No Valid Selection",
+                "Please select Stage-A rows with successful evaluation.",
+            )
+            return
+
+        self._running = True
+        self._btn_run.configure(state=tk.DISABLED)
+        self._btn_stage_b.configure(state=tk.DISABLED)
+
+        self._stage_b_selected = selected_rows
+        thread = threading.Thread(target=self._run_stage_b_bg, daemon=True)
+        thread.start()
+
+    def _run_stage_b_bg(self) -> None:
+        """Execute Stage B optimisation in a background thread."""
+        try:
+            inputs = self._make_inputs()
+
+            selected_results = [r.result for r in self._stage_b_selected]
+            n_sel = len(selected_results)
+
+            def _on_progress(current: int, total: int, pr: PipelineResult) -> None:
+                idx = len(self._results)
+                row = ResultRow(idx, pr, stage="B")
+                self._results.append(row)
+                self._insert_tree_row(row)
+                self._set_progress(current, total)
+                self._set_status(
+                    f"Stage B {current}/{total}: "
+                    f"{pr.candidate.glass1} + {pr.candidate.glass2} ..."
+                )
+
+            self._set_status(f"Stage B: optimising {n_sel} selected candidates...")
+            results_b = run_stage_b(
+                selected_results,
+                inputs,
+                top_n=n_sel,
+                on_progress=_on_progress,
+            )
+
+            n_ok = sum(1 for r in results_b if r.metrics.success)
+            self._set_status(
+                f"Stage B done — {n_ok}/{len(results_b)} optimised successfully"
+            )
+
+        except Exception as e:
+            self._set_status(f"Stage B ERROR: {e}")
+            self.after(
+                0, lambda err=e: messagebox.showerror("Stage B Error", str(err))
+            )
+
+        finally:
+            self.after(0, self._stage_b_done)
+
+    def _stage_b_done(self) -> None:
+        self._running = False
+        self._btn_run.configure(state=tk.NORMAL)
+        self._btn_stage_b.configure(state=tk.NORMAL)
 
     # ===================================================================
     # Thread-safe UI updates
@@ -612,6 +752,8 @@ class AutoAchromatGUI(tk.Tk):
         t2 = _fmt(rx.elements[1].t_center, ".2f") if rx else "—"
         gap = _fmt(rx.air_gap, ".2f") if rx and rx.air_gap is not None else "—"
         tp = "Cem" if row.cand.system_type == "cemented" else "Sp"
+        if row.stage == "B":
+            tp += "★"
 
         th = row.cand.thermal
         alpha_h = (
