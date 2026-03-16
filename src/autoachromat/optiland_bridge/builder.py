@@ -366,7 +366,7 @@ def _configure_system(op: optic.Optic, rx: ThickPrescription) -> None:
     # zero for on-axis only, making those aberrations identically 0.
     op.set_field_type(field_type="angle")
     op.add_field(y=0.0)
-    op.add_field(y=1.0)  # 1° off-axis for aberration evaluation
+    op.add_field(y=rx.half_field_angle)  # off-axis for aberration evaluation
 
     # Wavelengths  –  three spectral lines
     #   wavelengths = (lam1_short, lam0_primary, lam2_long)

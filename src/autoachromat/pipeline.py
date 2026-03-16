@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from typing import Optional, Callable, Any
 
@@ -253,40 +254,44 @@ def deduplicate_candidates(
 def process_candidate_stage_b(
     cand: Candidate,
     inputs: Inputs,
+    rx_a: Optional[ThickPrescription] = None,
 ) -> PipelineResult:
-    """Stage B: thicken → build → optimise → evaluate a single candidate.
+    """Stage B: build → optimise → evaluate a single candidate.
 
     Runs ``optimize_optic`` on the Stage-A starting design, then reads back
     the optimised geometry via ``rx_from_optic`` so that ``PipelineResult.rx``
     reflects the actual optimised surface parameters.  Falls back to the
     Stage-A optic (and Stage-A rx) if optimisation fails.
+
+    If *rx_a* is provided (from Stage A), thickening is skipped.
     """
     t0 = time.perf_counter()
 
-    # -- Step 1: Thicken (Stage A starting prescription) --
-    try:
-        rx_a = thicken(cand, inputs)
-    except Exception as exc:
-        m = OpticMetrics(
-            glass1=cand.glass1, glass2=cand.glass2,
-            catalog1=cand.catalog1, catalog2=cand.catalog2,
-            system_type=cand.system_type, PE=cand.PE,
-            success=False,
-            error_msg=f"thickening error: {type(exc).__name__}: {exc}",
-            build_time_ms=(time.perf_counter() - t0) * 1000.0,
-        )
-        return PipelineResult(cand, None, m)
-
+    # -- Step 1: Reuse Stage-A prescription or thicken from scratch --
     if rx_a is None:
-        m = OpticMetrics(
-            glass1=cand.glass1, glass2=cand.glass2,
-            catalog1=cand.catalog1, catalog2=cand.catalog2,
-            system_type=cand.system_type, PE=cand.PE,
-            success=False,
-            error_msg="thickening failed (geometry rejection)",
-            build_time_ms=(time.perf_counter() - t0) * 1000.0,
-        )
-        return PipelineResult(cand, None, m)
+        try:
+            rx_a = thicken(cand, inputs)
+        except Exception as exc:
+            m = OpticMetrics(
+                glass1=cand.glass1, glass2=cand.glass2,
+                catalog1=cand.catalog1, catalog2=cand.catalog2,
+                system_type=cand.system_type, PE=cand.PE,
+                success=False,
+                error_msg=f"thickening error: {type(exc).__name__}: {exc}",
+                build_time_ms=(time.perf_counter() - t0) * 1000.0,
+            )
+            return PipelineResult(cand, None, m)
+
+        if rx_a is None:
+            m = OpticMetrics(
+                glass1=cand.glass1, glass2=cand.glass2,
+                catalog1=cand.catalog1, catalog2=cand.catalog2,
+                system_type=cand.system_type, PE=cand.PE,
+                success=False,
+                error_msg="thickening failed (geometry rejection)",
+                build_time_ms=(time.perf_counter() - t0) * 1000.0,
+            )
+            return PipelineResult(cand, None, m)
 
     build_ms_start = time.perf_counter()
 
@@ -375,12 +380,41 @@ def run_stage_b(
         len(todo), len(group_list),
     )
 
+    total = len(group_list)
     results_b: list[PipelineResult] = []
-    for i, stage_a_r in enumerate(group_list):
-        r_b = process_candidate_stage_b(stage_a_r.candidate, inputs)
-        results_b.append(r_b)
-        if on_progress is not None:
-            on_progress(i + 1, len(group_list), r_b)
+
+    # Parallel processing — each candidate builds its own optiland Optic
+    # internally, so there is no shared state between workers.
+    import os
+    max_workers = min(total, max(1, os.cpu_count() or 1))
+
+    if max_workers == 1:
+        # Single candidate — no overhead from multiprocessing
+        for i, stage_a_r in enumerate(group_list):
+            r_b = process_candidate_stage_b(
+                stage_a_r.candidate, inputs, rx_a=stage_a_r.rx,
+            )
+            results_b.append(r_b)
+            if on_progress is not None:
+                on_progress(i + 1, total, r_b)
+    else:
+        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {
+                pool.submit(
+                    process_candidate_stage_b,
+                    stage_a_r.candidate,
+                    inputs,
+                    stage_a_r.rx,
+                ): stage_a_r
+                for stage_a_r in group_list
+            }
+            done_count = 0
+            for future in as_completed(future_map):
+                done_count += 1
+                r_b = future.result()
+                results_b.append(r_b)
+                if on_progress is not None:
+                    on_progress(done_count, total, r_b)
 
     results_b.sort(
         key=lambda r: r.metrics.rms_spot_radius
