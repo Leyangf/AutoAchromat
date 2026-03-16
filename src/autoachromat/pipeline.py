@@ -20,7 +20,6 @@ from .spaced import run_spaced
 from .thickening import thicken
 from .optiland_bridge.builder import (
     build_optic_from_prescription,
-    build_optic,
     rx_from_optic,
 )
 from .optiland_bridge.builder import _build_from_prescription
