@@ -36,6 +36,21 @@ class Inputs:
     # Spaced doublet air gap (mm); ignored for cemented
     air_gap: float = 1.0
 
+    # Half field angle [degrees] for off-axis evaluation in Stage B
+    half_field_angle: float = 1.0
+
+    # Stage B centre-thickness bounds [mm] (0 = auto)
+    # Auto: t_min = manufacturing minimum, t_max = max(5×t_min, 20)
+    # User values are clamped to respect manufacturing limits.
+    t1_min: float = 0.0
+    t1_max: float = 0.0
+    t2_min: float = 0.0
+    t2_max: float = 0.0
+
+    # Stage B air-gap bounds [mm] (0 = auto); spaced only
+    gap_min: float = 0.0
+    gap_max: float = 0.0
+
     # Numerical
     eps: float = 1e-12
     root_imag_tol: float = 1e-9
@@ -70,6 +85,7 @@ class Inputs:
             N=20,
             system_type="cemented",
             air_gap=1.0,
+            half_field_angle=1.0,
         )
         defaults.update(overrides)
         return cls(**defaults)
@@ -157,5 +173,6 @@ class ThickPrescription:
     back_focus_guess: float  # initial back focal distance for image_solve [mm]
     D: float  # entrance pupil diameter [mm]
     wavelengths: tuple[float, float, float]  # (lam1, lam0, lam2) [µm]
+    half_field_angle: float = 1.0  # off-axis field angle [degrees]
     actual_efl: float | None = None  # thick-lens EFL from ABCD [mm]
     efl_deviation: float | None = None  # (actual - target) / target
