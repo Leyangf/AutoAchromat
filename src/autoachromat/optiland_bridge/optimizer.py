@@ -209,21 +209,40 @@ def _run_optimization(
     te_min = lookup_t_edge_min(D)
     tc_min_neg = lookup_t_center_min(D)
 
+    # Per-element user bounds: (t_min_user, t_max_user) from inputs
+    user_bounds = [
+        (inputs.t1_min, inputs.t1_max),
+        (inputs.t2_min, inputs.t2_max),
+    ]
+
     for elem_idx, surf_idx in glass_surfaces:
         elem = rx.elements[elem_idx]
         is_positive = elem.t_center >= elem.t_edge
 
+        # Manufacturing minimum for t_center
         if is_positive:
-            # Correct minimum t_center from sag geometry at Stage-A radii
             R_f = _get_radius(op, surf_idx)
-            R_b = _get_radius(op, surf_idx + 1)   # back surface radius
+            R_b = _get_radius(op, surf_idx + 1)
             sag_f = _sag_local(R_f, a)
             sag_b = _sag_local(R_b, a)
-            t_min = max(te_min + sag_f - sag_b, 0.5)
+            mfg_min = max(te_min + sag_f - sag_b, 0.5)
         else:
-            t_min = max(tc_min_neg, 0.5)
+            mfg_min = max(tc_min_neg, 0.5)
 
-        t_max = max(t_min * 5.0, 20.0)
+        u_min, u_max = user_bounds[elem_idx]
+
+        # Lower bound: user value if set, clamped to manufacturing minimum
+        if u_min > 0:
+            t_min = max(u_min, mfg_min)
+        else:
+            t_min = mfg_min
+
+        # Upper bound: user value if set, clamped to >= t_min
+        if u_max > 0:
+            t_max = max(u_max, t_min)
+        else:
+            t_max = max(t_min * 5.0, 20.0)
+
         problem.add_variable(
             op, "thickness",
             surface_number=surf_idx,
@@ -236,8 +255,15 @@ def _run_optimization(
     # ------------------------------------------------------------------
     if is_spaced and air_gap_surface is not None:
         gap_current = rx.air_gap if rx.air_gap is not None else inputs.air_gap
-        gap_min = max(gap_current * 0.1, 1.0)
-        gap_max = gap_current * 20.0
+        # User-defined gap bounds; 0 = auto
+        if inputs.gap_min > 0:
+            gap_min = max(inputs.gap_min, 0.1)
+        else:
+            gap_min = max(gap_current * 0.1, 1.0)
+        if inputs.gap_max > 0:
+            gap_max = max(inputs.gap_max, gap_min)
+        else:
+            gap_max = gap_current * 20.0
         problem.add_variable(
             op, "thickness",
             surface_number=air_gap_surface,
@@ -298,12 +324,12 @@ def _run_optimization(
             "surface_number": image_surf,
             "Hx": 0.0,
             "Hy": 0.0,
-            "num_rays": 12,
+            "num_rays": 6,
             "wavelength": "all",
         },
     )
 
-    # RMS spot radius — off-axis (1° field), polychromatic.
+    # RMS spot radius — off-axis (full field), polychromatic.
     # Lower weight than on-axis so the optimiser does not sacrifice on-axis
     # performance for off-axis gains.
     problem.add_operand(
@@ -315,7 +341,7 @@ def _run_optimization(
             "surface_number": image_surf,
             "Hx": 0.0,
             "Hy": 1.0,
-            "num_rays": 12,
+            "num_rays": 6,
             "wavelength": "all",
         },
     )
@@ -330,7 +356,7 @@ def _run_optimization(
     # Optimise (TRF: Trust-Region Reflective — supports variable bounds)
     # ------------------------------------------------------------------
     optimizer = LeastSquares(problem)
-    result = optimizer.optimize(maxiter=500, tol=1e-6, method_choice="trf")
+    result = optimizer.optimize(maxiter=200, tol=1e-6, method_choice="trf")
 
     # Check on-axis RMS after optimisation
     try:
@@ -338,20 +364,23 @@ def _run_optimization(
     except Exception:
         rms_final = float("inf")
 
-    logger.debug(
-        "Stage B (%s): status=%s nfev=%d rms %.4f→%.4f mm message=%s",
+    rms_change_pct = (rms_final - rms_initial) / rms_initial * 100 if rms_initial > 0 else 0
+    logger.info(
+        "Stage B (%s): nfev=%d  rms %.4f → %.4f mm (%+.1f%%)  status=%s",
         rx.system_type,
-        result.status,
         result.nfev,
         rms_initial,
         rms_final,
+        rms_change_pct,
         result.message,
     )
 
-    # Revert to Stage-A if on-axis RMS got worse (>2 % tolerance)
-    if rms_final > rms_initial * 1.02:
-        logger.debug("Stage B: on-axis RMS worsened (%.4f > %.4f) — restoring Stage-A",
-                     rms_final, rms_initial)
+    # Revert to Stage-A if on-axis RMS got worse (>10 % tolerance)
+    if rms_final > rms_initial * 1.10:
+        logger.info(
+            "Stage B: on-axis RMS worsened %.4f → %.4f (%+.1f%%) — restoring Stage-A",
+            rms_initial, rms_final, rms_change_pct,
+        )
         for var, x in zip(problem.variables, x0_saved):
             var.update(x)
         problem.update_optics()
