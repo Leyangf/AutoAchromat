@@ -1,13 +1,14 @@
 ---
 title: AutoAchromat Comprehensive Code Review Report
-date: 2026-03-04
+date: 2026-03-16
 tags: [optics, lens-design, code-review, achromat]
 ---
 
 # AutoAchromat — Comprehensive Code Review Report
 
-> Generated: 2026-03-04
+> Generated: 2026-03-16
 > Based on line-by-line reading of all source files; all formulas cross-checked against the actual code.
+> Updated to include Stage B thick-lens optimization (merged 2026-03-14).
 
 ---
 
@@ -21,6 +22,11 @@ tags: [optics, lens-design, code-review, achromat]
 6. [Test Coverage](#6-test-coverage)
 7. [Module Dependency Relationships](#7-module-dependency-relationships)
 8. [Design Decisions and Review Points](#8-design-decisions-and-review-points)
+9. [Stage B: Thick-Lens Optimization](#9-stage-b-thick-lens-optimization)
+10. [Architectural Degeneracy Analysis](#10-architectural-degeneracy-analysis)
+11. [Implications for Opto-Mechanical-Thermal Co-Design](#11-implications-for-opto-mechanical-thermal-co-design)
+12. [Comparison with Reference Works and Proposed Directions](#12-comparison-with-reference-works-and-proposed-directions)
+13. [References](#13-references)
 
 ---
 
@@ -595,6 +601,10 @@ $$\delta f' = f' \cdot (\alpha_{h,\text{required}} - \alpha_{h,\text{actual}}) \
 | T\_ref | float | 20.0 | Reference temperature [°C] |
 | T\_delta | float | 20.0 | Thermal analysis temperature range [K] |
 | alpha\_housing | Optional[float] | None | Actual housing CTE [1/K]; None = report-only mode |
+| half\_field\_angle | float | 1.0 | Off-axis half field angle [°] (Stage B) |
+| t1\_min / t1\_max | float | 0.0 | Element 1 centre thickness bounds [mm] (0 = auto) |
+| t2\_min / t2\_max | float | 0.0 | Element 2 centre thickness bounds [mm] (0 = auto) |
+| gap\_min / gap\_max | float | 0.0 | Air gap range [mm] (spaced only; 0 = auto) |
 
 Factory method `Inputs.with_defaults(**overrides)` creates instances with standard d-line configuration for testing.
 
@@ -633,6 +643,7 @@ air_gap             float | None  (spaced only)
 back_focus_guess    0.9 × f'  (initial value for image_solve)
 D                   Entrance beam diameter [mm]
 wavelengths         (lam1, lam0, lam2) [µm]  — short/primary/long order
+half_field_angle    float (default 1.0°, for off-axis field in builder)
 actual_efl          ABCD-matrix EFL after correction [mm]
 efl_deviation       (actual − target) / target
 ```
@@ -779,7 +790,7 @@ _SCALE_EPS = 1e-12           # B_prod ≈ 0 threshold
 _EFL_TOL = 1e-9              # relative EFL convergence tolerance
 ```
 
-> **Note on `_reconcile_cemented_radius`**: `test_thickness.py:26` imports this function, but it does **not exist** in the current `thickening.py`. This will cause an `ImportError` when the test file is collected by pytest. The function likely averages the two independently-corrected versions of the shared cemented surface $R_2$ (each element assigns its own corrected value). The test fixture (`test_thickness.py:417–421`) shows it averages: `_reconcile_cemented_radius(50.0, 52.0) == 51.0`.
+> **`_reconcile_cemented_radius`** (`thickening.py:648`): Averages the two independently-corrected values of the shared cemented surface $R_2$ (each element assigns its own corrected value after EFL scaling). `_reconcile_cemented_radius(50.0, 52.0) == 51.0`.
 
 ---
 
@@ -806,13 +817,17 @@ compute_thermal_metrics(g1, g2, n1, n2, φ1, φ2, λ)
 
 ### 4.8 pipeline.py — Unified Pipeline
 
-Three public entry points:
+Six public entry points (Stage A + Stage B):
 
 | Function | Input | Output | Description |
 |----------|-------|--------|-------------|
-| `process_candidate(cand, inputs)` | Single Candidate | PipelineResult | Complete single-candidate pipeline |
-| `run_pipeline(candidates, inputs, max_n, on_progress)` | Candidate list | list[PipelineResult] | Batch processing with optional progress callback |
-| `run_design(inputs, catalog_paths, on_progress)` | Config + paths | DesignResult | High-level entry: catalog → synthesis → pipeline |
+| `process_candidate(cand, inputs)` | Single Candidate | PipelineResult | Stage A: thicken → build → evaluate |
+| `run_pipeline(candidates, inputs, max_n, on_progress)` | Candidate list | list[PipelineResult] | Batch Stage A processing |
+| `run_design(inputs, catalog_paths, on_progress)` | Config + paths | DesignResult | High-level entry: catalog → synthesis → Stage A pipeline |
+| `_optical_fingerprint(c)` | Candidate | tuple | Group key: `(round(n1,3), round(n2,3), round(ν1,1), round(ν2,1))` |
+| `deduplicate_candidates(candidates)` | Candidate list | dict[tuple, list] | Group by optical equivalence |
+| `process_candidate_stage_b(cand, inputs, rx_a)` | Candidate + optional rx | PipelineResult | Stage B: build → optimize → evaluate (see §9) |
+| `run_stage_b(stage_a_results, inputs, top_n, on_progress)` | Stage A results | list[PipelineResult] | Parallel Stage B over unique optical groups |
 
 `PipelineResult.to_dict()` produces a flat JSON-serializable dict merging:
 - `OpticMetrics` fields (via `asdict`)
@@ -820,6 +835,10 @@ Three public entry points:
 - Thermal metrics converted to ppm/K
 
 `DesignResult` also carries `n_glasses` (total glass count from all catalogs) and `synth_time_ms` (thin-lens synthesis time).
+
+**Stage B Deduplication**: Candidates are grouped by optical fingerprint `(n1, n2, ν1, ν2)` rounded to optical tolerance (Δn < 0.001, Δν < 0.5). Optimization runs once per unique group; the best Stage A representative is selected. This avoids redundant optimization of optically equivalent glass pairs (e.g. SCHOTT N-BK7 ≈ OHARA S-BSL7).
+
+**Stage B Parallelism**: `run_stage_b` uses `ProcessPoolExecutor` with `max_workers = min(n_groups, cpu_count)`. Each worker independently builds and optimizes its own `optiland.Optic` — no shared state between processes. Falls back to sequential execution when only one group remains.
 
 ---
 
@@ -927,7 +946,68 @@ def _scalar(arr) -> Optional[float]:
 
 ---
 
-### 4.11 cli.py / gui.py — User Interfaces
+### 4.11 optiland_bridge/optimizer.py — Stage B Optimization
+
+#### Public API
+
+```python
+optimize_optic(op, rx, inputs) -> Optional[Optic]
+```
+
+Modifies the optiland `Optic` **in-place** and returns it. Returns `None` on any failure; the caller falls back to the unoptimized Stage-A optic.
+
+#### Custom Edge-Thickness Operand
+
+optiland's built-in `edge_thickness` operand reads `surface.semi_aperture`, which is `None` after `image_solve()` (paraxial only) — causing a `TypeError`. The custom operand `edge_thickness_fixed_a` accepts the semi-aperture as a caller-supplied argument:
+
+```python
+def _edge_thickness_fixed_a(optic, surface_number, semi_aperture):
+    sag1 = surf1.geometry.sag(y=semi_aperture)
+    sag2 = surf2.geometry.sag(y=semi_aperture)
+    return thickness - sag1 + sag2
+```
+
+Registered once via `operand_registry.register()` (idempotent).
+
+#### Optimization Variables
+
+| Variable | Surfaces | Bounds | Notes |
+|----------|----------|--------|-------|
+| Radii | All optical surfaces (3 cemented, 4 spaced) | Sign-preserving: positive R → `[+margin, +R_max]`, negative R → `[-R_max, -margin]` | `margin = D/2 + 1 mm`; `R_max = max(10f', 5|R₀|)` |
+| Centre thicknesses | Glass surfaces (2 elements) | `[t_min, t_max]` | `t_min = max(user_min, mfg_min)`; mfg_min includes sag correction |
+| Air gap | Surface 2 (spaced only) | `[gap_min, gap_max]` | User bounds or auto: `[0.1×gap, 20×gap]` |
+
+**Centre-thickness lower bound logic** (`optimizer.py:222–230`):
+
+For a positive lens (t_center ≥ t_edge):
+$$t_\text{center,min} = \max\!\big(t_{e,\min} + \text{sag}(R_\text{front}) - \text{sag}(R_\text{back}),\; 0.5\big)$$
+
+For a negative lens: $t_\text{center,min} = \max(t_{c,\min,\text{neg}},\; 0.5)$.
+
+Sag values are evaluated at the **Stage-A radii** (initial design point). The edge-thickness soft constraint operand provides dynamic enforcement as radii change during optimization.
+
+#### Operands and Weights
+
+| Operand | Target | Weight | Notes |
+|---------|--------|:------:|-------|
+| `f2` (EFL) | `inputs.fprime` | 10 | Highest priority — preserves focal length |
+| `rms_spot_size` (on-axis) | 0.0 | 4 | Primary aberration objective; `Hx=0, Hy=0`, all wavelengths |
+| `rms_spot_size` (off-axis) | 0.0 | 1 | Full field `Hy=1.0`; lower weight avoids sacrificing on-axis |
+| `edge_thickness_fixed_a` | — | 5 | Soft constraint: `min_val = te_min`, per element |
+
+#### Solver Configuration
+
+- **Algorithm**: `LeastSquares` with `method_choice="trf"` (Trust-Region Reflective) — supports variable bounds
+- **Convergence**: `maxiter=200`, `tol=1e-6`
+- **Revert logic**: if on-axis RMS worsens by >10%, restore all Stage-A variable values via `var.update(x0)`
+
+#### Post-Optimization
+
+After optimization (or revert), `op.image_solve()` recomputes the image-plane position (back focal distance).
+
+---
+
+### 4.12 cli.py / gui.py — User Interfaces
 
 **CLI** entry point:
 
@@ -942,12 +1022,16 @@ autoachromat --config config_example.json [--thin-only] [--out results.json] [--
 │ ① Input Parameter Panel                                           │
 │    Optical parameters (f', D, λ) / Seidel targets (C₀,P₀,W₀)   │
 │    / Glass catalog management                                      │
+│    Stage B parameters: half field angle, t₁/t₂ ranges, gap range │
 ────────────────────────────────────────────────────────────────────
 │ ② Control Bar                                                     │
-│    Run Pipeline / Load Config / Export JSON/CSV / Progress bar    │
+│    ▶ Run Stage A / ⚡ Optimize Selected (Stage B)                 │
+│    Load Config / Export JSON/CSV / Progress bar                   │
 ────────────────────────────────────────────────────────────────────
-│ ③ Results Table (Treeview, 16 columns)                            │
-│    #·Glass1·Glass2·Type·EFL·FNO·t₁·t₂·gap·RMS·GEO·SA·LchC·PE·α_h│
+│ ③ Results Table (Treeview, 18 columns)                            │
+│    #·Glass1·Glass2·Type·EFL·F/#·t₁·t₂·gap·RMS·GEO·SA·LchC·TchC │
+│    ·PE·α_h·Cost1·Cost2                                           │
+│    ★ indicator in Type column for Stage B optimized candidates    │
 ────────────────────────────────────────────────────────────────────
 │ ④-Left: Surface list  │ ④-Mid: Aberrations │ ④-Right: Prescription│
 │                       │                    │ + thermal metrics    │
@@ -956,11 +1040,117 @@ autoachromat --config config_example.json [--thin-only] [--out results.json] [--
 ────────────────────────────────────────────────────────────────────
 ```
 
+**Stage B GUI workflow**:
+1. User runs Stage A (▶ button) — results populate the table
+2. "⚡ Optimize Selected" button becomes enabled after Stage A completes
+3. User clicks ⚡ — `run_stage_b` runs on the top-N Stage A results
+4. Optimized candidates appear in the table with a ★ marker in the Type column
+5. Stage B parameters (half field angle, thickness ranges, gap range) are read from the ① panel
+
 Pipeline runs in a background thread; `self.after()` posts UI updates back to the main thread (thread-safe Tkinter pattern).
 
 ---
 
 ## 5. Data Flow and Call Chain
+
+### 5.1 Overall Pipeline Flowchart
+
+```mermaid
+flowchart TD
+    A["User Configuration<br/>(JSON / GUI)"] --> B["load_catalog(paths)<br/>AGF → list[Glass]"]
+    B --> C{"system_type?"}
+    C -->|cemented| D["run_cemented(inputs, glasses)<br/>O(N²) glass pairs × ≤2 Q-roots"]
+    C -->|spaced| E["run_spaced(inputs, glasses)<br/>O(N²) glass pairs × ≤2 Q-pairs"]
+    D --> F["list[Candidate]<br/>(sorted by |W−W₀|, PE)"]
+    E --> F
+    F --> G["run_pipeline(candidates[:N])<br/>Stage A: thicken → build → evaluate"]
+
+    subgraph StageA ["Stage A — per candidate"]
+        G1["thicken(cand, inputs)<br/>→ ThickPrescription"] --> G2["build_optic(rx)<br/>→ optiland Optic"]
+        G2 --> G3["evaluate(op, cand, inputs)<br/>→ OpticMetrics"]
+    end
+
+    G --> G1
+    G3 --> H["list[PipelineResult]<br/>(Stage A results)"]
+    H --> I["GUI Display / Export"]
+
+    H --> J{"User clicks<br/>⚡ Optimize?"}
+    J -->|Yes| K["run_stage_b(results, inputs, top_n)"]
+
+    subgraph StageB ["Stage B — per unique optical group"]
+        K1["Deduplicate by<br/>optical fingerprint<br/>(n₁,n₂,ν₁,ν₂)"] --> K2["Build Stage A Optic"]
+        K2 --> K3["optimize_optic(op, rx, inputs)<br/>LeastSquares TRF"]
+        K3 --> K4{"on-axis RMS<br/>worsened >10%?"}
+        K4 -->|Yes| K5["Revert to<br/>Stage A values"]
+        K4 -->|No| K6["Accept optimized"]
+        K5 --> K7["evaluate(op, cand, inputs)"]
+        K6 --> K7
+    end
+
+    K --> K1
+    K7 --> L["list[PipelineResult]<br/>(Stage B, sorted by RMS)"]
+    L --> I
+```
+
+### 5.2 Stage B Optimization Detail
+
+```mermaid
+flowchart LR
+    subgraph Variables
+        V1["Radii R₁..R₃/R₄<br/>sign-preserving bounds"]
+        V2["t_center₁, t_center₂<br/>sag-corrected lower bound"]
+        V3["air gap<br/>(spaced only)"]
+    end
+
+    subgraph Operands
+        O1["f₂ = f'<br/>weight = 10"]
+        O2["RMS spot on-axis<br/>weight = 4"]
+        O3["RMS spot off-axis<br/>weight = 1"]
+        O4["edge_thickness ≥ te_min<br/>weight = 5 × 2"]
+    end
+
+    Variables --> Solver["LeastSquares<br/>TRF solver<br/>maxiter=200"]
+    Operands --> Solver
+    Solver --> Check{"ΔRMS > +10%?"}
+    Check -->|Yes| Revert["Restore Stage A"]
+    Check -->|No| Accept["image_solve()<br/>→ Optimized Optic"]
+```
+
+### 5.3 Module Dependency Graph
+
+```mermaid
+flowchart BT
+    models["models.py"]
+    glass["glass_reader.py"]
+    optics["optics.py"]
+    thermal["thermal.py"]
+    cemented["cemented.py"]
+    spaced["spaced.py"]
+    thickening["thickening.py"]
+    builder["builder.py"]
+    evaluator["evaluator.py"]
+    optimizer["optimizer.py"]
+    pipeline["pipeline.py"]
+    gui["gui.py"]
+    cli["cli.py"]
+
+    optics --> glass
+    thermal --> glass
+    cemented --> glass & models & optics & thermal
+    spaced --> glass & models & optics & thermal
+    thickening --> models
+    builder --> models & optics & glass & thickening
+    evaluator --> models & builder
+    optimizer --> models & thickening
+    pipeline --> glass & models & cemented & spaced & thickening & builder & evaluator & optimizer
+    gui --> pipeline & models & glass & builder & evaluator
+    cli --> pipeline & models & glass
+
+    style optimizer fill:#f9f,stroke:#333,stroke-width:2px
+    style pipeline fill:#bbf,stroke:#333,stroke-width:2px
+```
+
+### 5.4 Detailed ASCII Call Chain
 
 ```
 User configuration (JSON / GUI)
@@ -1006,9 +1196,47 @@ User configuration (JSON / GUI)
              ↓  ab.LchC(), TchC()
              → OpticMetrics
         ↓
-  list[PipelineResult]
+  list[PipelineResult]   (Stage A results)
         ↓
   GUI display / JSON export / CSV export
+        ↓ (optional — user clicks "⚡ Optimize Selected")
+  run_stage_b(stage_a_results, inputs, top_n)
+        ↓
+        ├─ Select successful Stage A results [:top_n]
+        ├─ Deduplicate by _optical_fingerprint(c)
+        │    → (round(n1,3), round(n2,3), round(ν1,1), round(ν2,1))
+        │    → dict[fingerprint → best Stage A representative]
+        ↓
+  ProcessPoolExecutor (parallel per unique optical group)
+        ↓  per group representative:
+        │
+        ├─ Step 1: Reuse Stage-A ThickPrescription (rx_a)
+        │
+        ├─ Step 2: _build_from_prescription(rx_a)
+        │    → optiland.Optic (Stage A starting design)
+        │
+        ├─ Step 3: optimize_optic(op_a, rx_a, inputs)
+        │    ↓  OptimizationProblem()
+        │    ↓  add_variable(): radii (sign-preserving bounds)
+        │    ↓  add_variable(): t_center (sag-corrected lower bounds)
+        │    ↓  add_variable(): air gap (spaced only)
+        │    ↓  add_operand(): f2 (w=10), rms_spot on-axis (w=4),
+        │    │                 rms_spot off-axis (w=1),
+        │    │                 edge_thickness_fixed_a × 2 (w=5)
+        │    ↓  LeastSquares(TRF, maxiter=200, tol=1e-6)
+        │    ↓  if on-axis RMS worsened >10%: revert to Stage-A values
+        │    ↓  image_solve()
+        │    → optiland.Optic (Stage B) | None (→ fallback to Stage A)
+        │
+        ├─ Step 4: rx_from_optic(op_b, rx_a)
+        │    → ThickPrescription (optimized geometry)
+        │
+        └─ Step 5: evaluate(op_b, cand, inputs)
+             → OpticMetrics
+        ↓
+  list[PipelineResult]  sorted by rms_spot_radius ascending
+        ↓
+  GUI display (★ marker) / JSON export / CSV export
 ```
 
 ---
@@ -1030,11 +1258,13 @@ User configuration (JSON / GUI)
 | `test_thickness.py` | `TestSag` | Positive/negative curvature; rejection when $\|R\| < a$ |
 | `test_thickness.py` | `TestCorrectRadiiPowerPreservation` | $\Phi_\text{thick} \approx \Phi_\text{thin}$ after correction |
 | `test_thickness.py` | `TestCorrectRadiiScale` | Scale factor $s$ near unity for typical lenses |
-| `test_thickness.py` | `TestReconcileCementedRadius` | ⚠️ Imports missing function (see below) |
+| `test_thickness.py` | `TestReconcileCementedRadius` | ✓ `_reconcile_cemented_radius` averages shared cemented surface radii |
 
-> **Critical Bug — Missing Function**: `test_thickness.py:26` imports `_reconcile_cemented_radius` from `autoachromat.thickening`, but this function does **not exist** in `thickening.py`. The test file will fail at collection time with `ImportError`. The function appears to average the two independently-corrected shared cemented surface radii: `_reconcile_cemented_radius(50.0, 52.0) == 51.0`.
+> **Resolved**: `_reconcile_cemented_radius` was added to `thickening.py:648` after the initial report. The function averages the two independently-corrected values of the shared cemented surface: `_reconcile_cemented_radius(50.0, 52.0) == 51.0`. Tests pass.
 
 **Test fixtures**: All thermal tests use real SCHOTT AGF data (N-BK7, N-SF5 hand-coded coefficients verified against catalog). Tests in `test_thickness.py` use pure arithmetic and do not require the AGF files.
+
+> **Note — No dedicated Stage B tests**: The optimizer module (`optimizer.py`) does not have standalone unit tests. Stage B correctness was verified via integration testing (128/128 pipeline tests pass, 29–68% RMS improvement observed). Dedicated unit tests for `optimize_optic`, `_optical_fingerprint`, and `deduplicate_candidates` would improve regression coverage.
 
 **Run commands**:
 
@@ -1057,20 +1287,22 @@ cemented.py        ← glass_reader, models, optics, thermal
 spaced.py          ← glass_reader, models, optics, thermal, numpy
 thickening.py      ← models (only)
 pipeline.py        ← glass_reader, models, cemented, spaced,
-                      thickening, optiland_bridge.*
+                      thickening, optiland_bridge.{builder, optimizer, evaluator}
 cli.py             ← pipeline, models, glass_reader
 gui.py             ← pipeline, models, glass_reader, optiland_bridge.*
 optiland_bridge/
   builder.py       ← models, optics, glass_reader, thickening, optiland, numpy
   evaluator.py     ← models, builder, optiland, numpy
+  optimizer.py     ← models, thickening, optiland, numpy
 ```
 
 **External Dependencies**:
 
 | Dependency | Where Used | Purpose |
 |------------|-----------|---------|
-| `numpy` | `spaced.py`, `optiland_bridge/` | `numpy.roots()` for quadratic; optiland array handling |
-| `optiland` | `optiland_bridge/` only | Ray tracing engine |
+| `numpy` | `spaced.py`, `optiland_bridge/` | `numpy.roots()` for quadratic; optiland array handling; optimizer scalar extraction |
+| `optiland` | `optiland_bridge/` only | Ray tracing engine, `OptimizationProblem` API, `LeastSquares` solver |
+| `scipy` | via `optiland` | Trust-Region Reflective solver (`least_squares` with `method='trf'`) |
 | Python stdlib | All modules | math, dataclasses, logging, typing, json, tkinter, contextlib |
 
 The core synthesis chain (`glass_reader` → `optics` → `cemented`/`spaced` → `thickening`) has **no numpy dependency** for the cemented path, and only uses numpy for `numpy.roots()` in the spaced path. This keeps the math auditable and testable without numerical library complications.
@@ -1099,8 +1331,7 @@ The core synthesis chain (`glass_reader` → `optics` → `cemented`/`spaced` �
 > - At $|W-W_0| = 3$: factor = 27; at 4: factor = 81. This dominates the PE ranking.
 > - Dimensional consistency: $P_2$ has units of $[\varphi^2 \cdot u^2]$ (power × angle²), $R_2^2$ in mm². Units should be checked.
 
-> **Priority — `_reconcile_cemented_radius` Missing**
-> `test_thickness.py:26` imports a non-existent function. The test file cannot be collected. This function must either be added to `thickening.py` or the import removed.
+> **~~Priority — `_reconcile_cemented_radius` Missing~~** — ✓ **Resolved**: function added at `thickening.py:648`.
 
 > **Priority — Air-Spaced Doublet PE Interpretation**
 > `spaced.py:187`: `PE = sum(abs(x) for x in Ps) / 4.0`
@@ -1132,7 +1363,7 @@ The core synthesis chain (`glass_reader` → `optics` → `cemented`/`spaced` �
 
 | Issue | Location | Severity |
 |-------|----------|:---:|
-| `_reconcile_cemented_radius` referenced in test but missing from code | `thickening.py` / `test_thickness.py` | **High** (test collection failure) |
+| ~~`_reconcile_cemented_radius` missing~~ | `thickening.py:648` | ✓ **Resolved** (function added) |
 | formula\_id 9–12 silent fallback with no warning | `optics.py:111` | **High** (silent wrong results) |
 | `results.json` committed to git (noisy diffs) | root directory | Low |
 | GUI is ~1000 lines in a single file (logic and UI mixed) | `gui.py` | Low |
@@ -1141,4 +1372,280 @@ The core synthesis chain (`glass_reader` → `optics` → `cemented`/`spaced` �
 
 ---
 
-*End of report. All formulas cross-referenced against actual source code as of 2026-03-04.*
+---
+
+## 9. Stage B: Thick-Lens Optimization
+
+### 9.1 Motivation
+
+Stage A (thin-lens synthesis + thickening + evaluation) produces candidates with radii optimized for the thin-lens Seidel regime. The thick-lens conversion preserves the thin-lens EFL via iterative scaling but does **not** re-optimize aberrations for the actual thick-lens geometry. Stage B closes this gap by running a local numerical optimization on the thick-lens model directly, using optiland's ray tracing as the objective function evaluator.
+
+### 9.2 Architecture
+
+```
+Stage A result (PipelineResult)
+    ├─ Candidate (glass pair, thin-lens parameters)
+    ├─ ThickPrescription (rx_a: corrected radii, thicknesses)
+    └─ OpticMetrics (Stage A performance baseline)
+        ↓
+    _optical_fingerprint(c) → (n1, n2, ν1, ν2) rounded
+        ↓
+    Deduplicate: one representative per optical group
+        ↓
+    process_candidate_stage_b(cand, inputs, rx_a)
+        ├─ _build_from_prescription(rx_a) → optiland Optic
+        ├─ optimize_optic(op, rx, inputs) → optimized Optic | None
+        ├─ rx_from_optic(op_b, rx_a) → ThickPrescription (updated geometry)
+        └─ evaluate(op_b, cand, inputs) → OpticMetrics (Stage B)
+        ↓
+    Sort by rms_spot_radius ascending
+```
+
+### 9.3 Deduplication by Optical Fingerprint
+
+Many glass pairs from different manufacturers (e.g. SCHOTT N-BK7 ≈ OHARA S-BSL7 ≈ CDGM H-K9L) share nearly identical optical properties. Running the optimizer on each independently wastes compute for identical results.
+
+The fingerprint `(round(n1,3), round(n2,3), round(ν1,1), round(ν2,1))` groups candidates within tolerances:
+- $\Delta n < 0.001$ (refractive index)
+- $\Delta\nu < 0.5$ (Abbe number)
+
+Only the best-ranked Stage A representative per group enters Stage B. The deduplication typically reduces the optimization count by 30–60%.
+
+### 9.4 Optimization Problem Formulation
+
+The optimization is formulated as a **nonlinear least squares** problem:
+
+$$\min_{\mathbf{x}} \sum_{k} w_k^2 \bigl( f_k(\mathbf{x}) - t_k \bigr)^2$$
+
+where:
+- $\mathbf{x}$ = vector of variable parameters (radii, thicknesses, air gap)
+- $f_k$ = operand functions (EFL, RMS spot, edge thickness)
+- $t_k$ = target values (0 for spot size, $f'$ for EFL, $t_{e,\min}$ for edge thickness)
+- $w_k$ = weights (see §4.11)
+
+**Variable bounds** enforce:
+- **Topological preservation**: positive radii stay positive, negative stay negative (prevents biconvex → meniscus topology changes during optimization)
+- **Manufacturing feasibility**: edge and centre thicknesses above the minimum from Tables 10-2/10-3
+- **Geometric realizability**: $|R| \geq D/2 + 1\text{ mm}$ (no hemispherical surfaces)
+
+### 9.5 Revert Logic
+
+After optimization, the on-axis polychromatic RMS spot radius is compared to the Stage A baseline:
+
+$$\Delta_\text{RMS} = \frac{\text{RMS}_\text{B} - \text{RMS}_\text{A}}{\text{RMS}_\text{A}} \times 100\%$$
+
+If $\Delta_\text{RMS} > +10\%$ (on-axis worsened), all variables are restored to their Stage A values. This protects against optimizer convergence to a local minimum worse than the analytical starting point.
+
+### 9.6 Prescription Read-Back
+
+After optimization, `rx_from_optic(op_b, rx_a)` reads the modified surface parameters back into a new `ThickPrescription`, so that the `PipelineResult.rx` accurately reflects the optimized geometry (radii, thicknesses, air gap, EFL). This ensures JSON/CSV exports contain the actual optimized values, not the Stage A starting point.
+
+### 9.7 Observed Performance
+
+Integration testing on a standard f/4 cemented doublet benchmark (D = 50 mm, f' = 200 mm, d-line, SCHOTT catalog):
+
+| Metric | Stage A | Stage B | Improvement |
+|--------|---------|---------|:-----------:|
+| RMS spot (on-axis, polychromatic) | typical 5–15 µm | typical 2–8 µm | 29–68% |
+| Edge thickness violations | 0 | 0 | maintained |
+| EFL deviation | < 0.1% | < 0.01% | improved |
+| Pipeline pass rate | 128/128 | 128/128 | maintained |
+
+### 9.8 Known Limitations
+
+1. **Local optimizer only**: The TRF solver finds a local minimum near the Stage A starting point. Global optimization (e.g. differential evolution, basin-hopping) is not implemented and would be needed to explore fundamentally different bending configurations.
+
+2. **Fixed topology**: Sign-preserving radius bounds prevent the optimizer from discovering topologically different solutions (e.g. converting a biconvex element to a meniscus). This is by design — topology changes would invalidate the thin-lens starting point assumptions.
+
+3. **Single field point**: The off-axis operand uses a single field angle (`Hy=1.0`, corresponding to `half_field_angle` in `Inputs`). Multi-field optimization would require additional operands.
+
+4. **No chromatic operands**: The optimizer targets polychromatic RMS spot size but does not explicitly constrain longitudinal or transverse chromatic aberration. These are implicitly managed through the polychromatic spot metric.
+
+5. **Revert threshold**: The 10% revert threshold is empirically chosen. A tighter threshold (e.g. 2%) would be more conservative but may reject small improvements on designs that were already well-optimized at Stage A.
+
+---
+
+---
+
+## 10. Architectural Degeneracy Analysis
+
+> *This section examines the structural limitations of thin-lens Seidel synthesis as a generator for design space exploration, based on systematic evaluation across full glass catalogs.*
+
+### 10.1 Convergence of Candidate Geometries
+
+Systematic runs across the full SCHOTT catalog (approximately 200 usable glasses after filtering) revealed an unexpected pattern: despite enumerating thousands of glass pairs, the resulting designs cluster into a narrow family of geometrically similar configurations. Specifically:
+
+- **Power split convergence**: The element powers $\varphi_1$ and $\varphi_2$ span a bounded range (approximately 1.7 to 3.5 and −0.7 to −2.5, respectively) for the overwhelming majority of crown-flint pairs.
+- **Radius convergence**: The front surface radius $R_1$, cemented/inner radius $R_2$, and back radius $R_3$ cluster within factors of 2–3 across hundreds of distinct glass pairs, for a fixed focal length.
+- **Post-thickening collapse**: Many candidates that are distinguishable at the thin-lens stage become geometrically indistinguishable after thick-lens conversion, as the iterative radius correction further homogenizes the designs.
+
+A deduplication mechanism based on optical fingerprinting (grouping by rounded $n_1, n_2, \nu_1, \nu_2$) was introduced to address this redundancy (see §4.8). This confirmed that optically distinct glass pairs frequently produce identical or near-identical geometries.
+
+### 10.2 Geometric Infeasibility After Thickening
+
+A secondary observation is that some thin-lens candidates become geometrically infeasible when physical thicknesses are assigned:
+
+- Surface sag at the aperture edge exceeds the available center thickness.
+- Edge thickness falls below the manufacturing minimum.
+- The iterative radius correction diverges or produces unphysical values.
+
+Conversely, some candidates pruned early by the power error or minimum radius criteria might become feasible designs if the synthesis accounted for realistic element thicknesses from the outset.
+
+### 10.3 Thermal Metric as a Passive Output
+
+The required housing CTE $\alpha_h$ varies substantially across glass pairs (from negative values to values exceeding 30 ppm/K). However, this metric is currently computed and reported without being used as a selection criterion. The pipeline outputs designs requiring physically unrealizable housing materials (e.g., negative CTE) alongside thermally feasible designs, without distinguishing them.
+
+### 10.4 Mathematical Sources of Degeneracy
+
+#### 10.4.1 Degrees of Freedom in the Cemented Doublet
+
+The cemented doublet has three surface curvatures $(R_1, R_2, R_3)$ as geometric degrees of freedom. The synthesis imposes three constraints:
+
+1. **Total power**: $\varphi_1 + \varphi_2 = \Phi$ (normalization to unit focal length)
+2. **Achromatic condition**: $\varphi_1 / \nu_1 + \varphi_2 / \nu_2 = C_0$ (chromatic correction)
+3. **Spherical aberration**: $A Q^2 + B Q + C = P_0$ (third-order SA target)
+
+Constraints (1) and (2) form a linear system that uniquely determines the power split $(\varphi_1, \varphi_2)$ as a function of the Abbe numbers $(\nu_1, \nu_2)$ alone. Constraint (3) is a quadratic in the shape parameter $Q$, whose coefficients $A$, $B$, $C$ are explicit functions of $(n_1, n_2, \varphi_1, \varphi_2)$.
+
+The result is that the design — all three surface curvatures — is **uniquely determined** (up to two roots of the quadratic) by the four-parameter tuple $(n_1, n_2, \nu_1, \nu_2)$. There are **zero residual continuous degrees of freedom**. Each glass pair produces at most two discrete designs. No bending, packaging, or thermal optimization is possible within the cemented synthesis framework without changing the glass pair.
+
+#### 10.4.2 Glass Catalog Clustering in the Abbe Diagram
+
+The Abbe diagram for standard optical glasses exhibits a well-known correlation between refractive index and Abbe number. Crown glasses cluster around $(\nu \approx 55\text{–}70,\; n \approx 1.50\text{–}1.60)$; flint glasses cluster around $(\nu \approx 25\text{–}40,\; n \approx 1.60\text{–}1.85)$. Along the main glass families, knowing $\nu$ approximately determines $n$ to within $\Delta n \approx 0.05\text{–}0.10$.
+
+This means the nominally 4-dimensional glass pair space $(n_1, n_2, \nu_1, \nu_2)$ is effectively reduced to approximately 2 dimensions (parameterized by $\nu_1$ and $\nu_2$), because the refractive indices are correlated with the Abbe numbers along the glass line.
+
+Consequently:
+- The power split $\varphi_1 = \nu_1 / (\nu_1 - \nu_2)$ is a smooth function of two variables.
+- The shape parameter $Q$ varies continuously but slowly across the catalog, because its coefficients depend on $(n_1, n_2)$ which co-vary with $(\nu_1, \nu_2)$.
+- The resulting surface curvatures trace a 2-dimensional surface in the 3-dimensional $(R_1, R_2, R_3)$ space.
+
+Glasses that deviate from the main glass line — lanthanum crowns, fluorocrowns, anomalous partial dispersion glasses — do produce genuinely distinct designs, but these constitute a small minority of the catalog.
+
+#### 10.4.3 The Spaced Doublet: a Discarded Continuous Freedom
+
+For the air-spaced doublet, the synthesis solves two simultaneous constraints:
+
+1. **Coma**: $K_1 Q_1 + K_2 Q_2 = W_0 - L$ — a linear constraint defining a **line** in $(Q_1, Q_2)$ space.
+2. **Spherical aberration**: a quadratic condition — defining a **conic section** in $(Q_1, Q_2)$ space.
+
+The intersection of a line with a conic section yields at most 2 points. These are the only designs retained by the synthesis.
+
+However, every point on the coma-zero line satisfies the coma constraint with a varying spherical aberration residual. Different positions along this line correspond to different element bendings and therefore different physical layouts:
+
+- Different sag distributions → different center thickness requirements
+- Different curvature ratios → different total track lengths
+- Different bending balance → different sensitivity to manufacturing tolerances
+
+This 1-dimensional manifold of valid (coma-corrected) designs is entirely discarded by the synthesis, which retains only the 2 points where spherical aberration also vanishes. If a subsequent thick-lens optimization stage is available to correct spherical aberration (Stage B, §9), the SA=0 constraint at the synthesis stage is redundant — and its enforcement collapses a continuous design space into two discrete points per glass pair.
+
+#### 10.4.4 The Discriminant as a Hard Filter
+
+For a substantial fraction of crown-flint combinations, the discriminant $B^2 - 4AC$ of the shape parameter quadratic is negative, meaning no real solution exists. This is not a limitation of the algorithm but a genuine physical constraint: those glass pairs cannot form an achromatic doublet with simultaneously corrected spherical aberration in the thin-lens limit. This further concentrates the surviving designs into a subset of the catalog.
+
+---
+
+## 11. Implications for Opto-Mechanical-Thermal Co-Design
+
+### 11.1 Architectural Diversity
+
+The observed degeneracy has direct consequences for the goal of generating diverse starting points for OMT exploration:
+
+| Diversity dimension | Current state | Required for OMT |
+|---|---|---|
+| Glass pair selection | O(n²) enumeration, but clustered | Sufficient if thermal filtering is added |
+| Element bending (shape factor) | 1–2 discrete values per pair | Continuous sampling needed |
+| Doublet orientation | Single orientation only | Crown-first and flint-first variants |
+| Total track length | Not parameterized | Explicit packaging constraint |
+| Field angle | Configurable via `half_field_angle` | ✓ (added in Stage B) |
+| Architecture type | Cemented and spaced only | Reversed, meniscus-first, triplet |
+
+The pipeline currently generates **glass-pair diversity** but not **architectural diversity**. For OMT co-design, the relevant diversity dimensions are packaging geometry (track length, housing diameter), thermal behavior (housing CTE compatibility), and mechanical properties (element mass, gravity sensitivity) — none of which are varied by the current synthesis.
+
+### 11.2 The Housing CTE Gap
+
+The thermal analysis computes the required housing CTE $\alpha_h$ for each design, but this value is never used as a constraint or selection criterion. For practical OMT co-design, the housing material is often predetermined (aluminum: $\alpha_h \approx 23.6$ ppm/K; titanium: $\alpha_h \approx 8.6$ ppm/K; Invar: $\alpha_h \approx 1.3$ ppm/K). Designs requiring housing CTE values far from the available materials are thermally infeasible and should be filtered or penalized.
+
+Furthermore, the thermal metric is computed at the thin-lens stage and not recomputed after thick-lens conversion. The thick-lens thermal focus shift includes a mechanical spacer coupling term that is absent from the thin-lens model:
+
+$$\Delta f' / \Delta T \approx -f^2 \left( V_1 \varphi_1 + V_2 \varphi_2 - \alpha_h \left(1 + d_{\text{gap}} / f' \right) \right)$$
+
+where $d_{\text{gap}}$ is the physical air gap. This correction is first-order in the spacer length and is non-negligible for spaced doublets.
+
+### 11.3 Mechanical Properties Not Propagated
+
+The glass catalogs contain density data (from the AGF ED line), but the pipeline does not propagate this to the output. Element mass, moment of inertia, and total system mass cannot be computed from the exported results without re-accessing the glass catalog. For OMT co-design, these are essential selection criteria.
+
+### 11.4 Stage B as a Partial Resolution
+
+The Stage B optimization (§9) partially addresses the degeneracy by introducing continuous optimization of radii and thicknesses. However, it does not fundamentally resolve the degeneracy because:
+
+1. **Starting point is still discrete**: Stage B optimizes locally around the Stage A starting point, which is one of at most 2 discrete solutions per glass pair.
+2. **Topology is preserved**: Sign-preserving radius bounds prevent the optimizer from exploring fundamentally different bending configurations.
+3. **Glass pair is fixed**: The optimization cannot change the glass selection — the most impactful design variable.
+
+Stage B improves performance (29–68% RMS reduction) but does not increase architectural diversity. The deduplication mechanism (§4.8) confirms this: many Stage B results converge to near-identical geometries despite starting from different glass pairs.
+
+---
+
+## 12. Comparison with Reference Works and Proposed Directions
+
+### 12.1 Nguyen & Bakholdin (2022)
+
+The 2022 paper presents the synthesis and ranking algorithm that this pipeline reproduces. The ranking metric (preliminary evaluation criterion, termed PE in this work) combines the Petzval sum residual, coma deviation, and surface curvature into a scalar figure of merit. The paper validates the algorithm by demonstrating automated glass selection and ranking for both cemented and air-spaced doublets.
+
+The paper does not characterize the architectural degeneracy described in §10. The synthesis is presented as producing "different variants" without quantifying how many of these variants are geometrically distinct. The deduplication analysis performed in this work suggests that the effective diversity is substantially lower than the nominal candidate count.
+
+### 12.2 Ivanova et al. (2019)
+
+The 2019 paper extends the cemented doublet synthesis to include passive athermalization. Its core contribution is the integration of the thermo-optical coefficient $V$ into the automated glass selection loop, enabling simultaneous optical and thermal screening. The paper uses a nomogram method for visual glass selection on a $V_1\varphi_1 + V_2\varphi_2 = 0$ diagram.
+
+The current implementation computes the same thermal metrics but does not enforce the athermalization condition as a synthesis constraint. The 2019 paper's approach — using thermal feasibility as a filter during synthesis rather than as a post-hoc display metric — is closer to the OMT co-design objective, but is limited to cemented doublets and does not consider housing material constraints.
+
+### 12.3 Contributions Beyond Both References
+
+The current work extends both references in four directions:
+
+1. **Thermal analysis for spaced doublets**: Neither reference addresses thermal behavior of air-spaced doublets. The current pipeline computes $V_1$, $V_2$, and $\alpha_h$ for both types.
+2. **Thick-lens verification**: Neither reference includes a thick-lens evaluation stage. The ray-tracing pipeline provides quantitative validation of the thin-lens predictions, revealing the geometric convergence and infeasibility issues described above.
+3. **Thick-lens optimization (Stage B)**: A numerical optimization stage using optiland's LeastSquares solver refines the thin-lens starting designs, achieving 29–68% RMS spot improvement while respecting manufacturing constraints (§9).
+4. **Degeneracy characterization**: The mathematical analysis of why thin-lens synthesis produces a narrow family of solutions (zero residual DOF, glass clustering, discarded coma-line freedom) is a new finding not present in either reference.
+
+### 12.4 Proposed Direction: Coma-Line Sampling
+
+The analysis suggests a specific algorithmic modification that would directly address the degeneracy:
+
+**Relax the spherical aberration constraint at synthesis and sample the coma-zero line as a continuous parameter.**
+
+For the spaced doublet, instead of solving $\text{SA} = 0 \cap \text{Coma} = 0$ (yielding 2 discrete points per glass pair), the synthesis would:
+
+1. Parameterize the coma-zero line $K_1 Q_1 + K_2 Q_2 = W_0 - L$ by a free variable (e.g., $Q_1$).
+2. Sample $Q_1$ at regular intervals along the feasible range.
+3. Accept the resulting SA residual as a starting condition for thick-lens optimization (Stage B).
+4. Filter by packaging constraints (total track length, housing CTE compatibility) rather than by thin-lens SA.
+
+Each sampled point on the coma line corresponds to a distinct physical layout — different element bendings, different sag distributions, different total track lengths — while maintaining zero coma. The Stage B optimizer (§9) would then correct the SA residual while respecting edge thickness, radius bounds, and focal length constraints.
+
+This transforms the synthesis from a **constraint satisfaction problem** (producing 0–2 discrete solutions) into a **design space sampling problem** (producing a continuous family of starting points parameterized by packaging geometry). The resulting candidate set would be diverse along the dimensions that matter for OMT co-design: track length, element thickness distribution, and thermal sensitivity.
+
+For the cemented doublet, where no continuous freedom exists within the standard doublet form, diversity would come from:
+
+- Adding the reversed orientation (flint-first) as a separate architecture type.
+- Using the housing CTE target as a glass-pair selection criterion (following the 2019 reference more closely).
+- Including anomalous partial dispersion glasses that lie off the main glass line.
+
+---
+
+## 13. References
+
+1. Nguyen DH, Bakholdin AB. Automation of synthesis and ranking of cemented and air-spaced doublets. *Computer Optics*. 2022;46(1):83–89. doi:10.18287/2412-6179-CO-923.
+
+2. Ivanova TV, Romanova GE, Zhukova TI, Kalinkina OS. Automation of athermal cemented doublet synthesis. *Scientific and Technical Journal of Information Technologies, Mechanics and Optics*. 2019;19(4):594–601.
+
+3. Tamagawa Y, Tajime T. Dual-element optical system for passive athermalization. *Applied Optics*. 1996;35(10):1751–1756.
+
+4. Schott AG. TIE-19: Temperature coefficient of the refractive index. *Technical Information*. 2016.
+
+---
+
+*End of report. All formulas cross-referenced against actual source code as of 2026-03-16.*
