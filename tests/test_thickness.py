@@ -23,7 +23,6 @@ from autoachromat.thickening import (
     outside_diameter,
     element_thickness,
     correct_radii_for_thickness,
-    _reconcile_cemented_radius,
     _SAG_MARGIN,
     _MIN_CENTER_ABSOLUTE,
 )
@@ -414,9 +413,3 @@ class TestCorrectRadiiEdgeCases:
         assert result[1] == pytest.approx(100.0)
 
 
-class TestReconcileCementedRadius:
-    def test_average(self):
-        assert _reconcile_cemented_radius(50.0, 52.0) == pytest.approx(51.0)
-
-    def test_identical(self):
-        assert _reconcile_cemented_radius(100.0, 100.0) == pytest.approx(100.0)

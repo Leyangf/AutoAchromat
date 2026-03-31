@@ -25,8 +25,7 @@ logger = logging.getLogger(__name__)
 
 _MIN_CENTER_ABSOLUTE = 0.5  # mm – always enforced (any lens)
 _SAG_MARGIN = 1e-6  # mm – reject if |R| < a + margin
-_CORRECTION_ITER = 4  # thickness → radii → re-thickness (2 rounds)
-_SCALE_EPS = 1e-12  # treat B_prod ≈ 0 as no correction needed
+_CORRECTION_ITER = 4  # thickness → radii → re-thickness iterations
 
 # ---------------------------------------------------------------------------
 # Table 10-2: Δ(D) for outside diameter (压圈法固定 / retaining ring)
@@ -222,91 +221,6 @@ def element_thickness(
         return None
 
     return (t_center, t_edge)
-
-
-# ---------------------------------------------------------------------------
-# Radius correction  –  keep Φ_thick = Φ_thin (Strategy A)
-# ---------------------------------------------------------------------------
-
-
-def correct_radii_for_thickness(
-    R_front: float,
-    R_back: float,
-    t: float,
-    n: float,
-) -> tuple[float, float] | None:
-    """Scale both curvatures so thick-lens power equals thin-lens power.
-
-    Keeps the *shape factor* (bending) invariant.  Both curvatures are
-    multiplied by the **same** scale *s* so that:
-
-        Φ_thick(s·c₁, s·c₂, t, n)  =  Φ_thin(c₁, c₂, n)
-
-    Returns ``(R_front', R_back')`` or ``None`` if correction fails
-    (e.g. discriminant < 0, s non-positive, or degenerate curvatures).
-    """
-
-    def _curv(R: float) -> float:
-        if not math.isfinite(R) or abs(R) < 1e-12:
-            return 0.0
-        return 1.0 / R
-
-    c1 = _curv(R_front)
-    c2 = _curv(R_back)
-
-    # If either surface is flat, Φ_thick = (n-1)·s·(c1-c2) → s = 1.
-    # Similarly if c1·c2 ≈ 0 the thickness term vanishes.
-    A = c1 - c2  # proportional to Φ_thin
-    B_prod = (n - 1.0) * t * c1 * c2 / n  # thickness coupling term
-
-    if abs(B_prod) < _SCALE_EPS:
-        # No correction needed (plano or negligible coupling)
-        return (R_front, R_back)
-
-    if abs(A) < 1e-15:
-        # Zero power lens – nothing to preserve
-        return (R_front, R_back)
-
-    # Solve:  B_prod · s² + A · s − A = 0
-    discriminant = A * A + 4.0 * A * B_prod
-    if discriminant < 0:
-        logger.debug(
-            "correct_radii: negative discriminant=%.6e for "
-            "R_f=%.4f R_b=%.4f t=%.4f n=%.4f",
-            discriminant,
-            R_front,
-            R_back,
-            t,
-            n,
-        )
-        return None
-
-    sqrt_disc = math.sqrt(discriminant)
-
-    # Two roots: pick the positive one closest to 1.0
-    s1 = (-A + sqrt_disc) / (2.0 * B_prod)
-    s2 = (-A - sqrt_disc) / (2.0 * B_prod)
-
-    candidates = [x for x in (s1, s2) if x > 0 and math.isfinite(x)]
-    if not candidates:
-        logger.debug(
-            "correct_radii: no positive root (s1=%.6e, s2=%.6e) for "
-            "R_f=%.4f R_b=%.4f t=%.4f n=%.4f",
-            s1,
-            s2,
-            R_front,
-            R_back,
-            t,
-            n,
-        )
-        return None
-
-    s = min(candidates, key=lambda x: abs(x - 1.0))
-
-    R_front_new = R_front / s if abs(c1) > 1e-12 else R_front
-    R_back_new = R_back / s if abs(c2) > 1e-12 else R_back
-
-    return (R_front_new, R_back_new)
 
 
 # ---------------------------------------------------------------------------
@@ -638,34 +552,6 @@ def thicken_spaced(
         actual_efl=actual_efl,
         efl_deviation=efl_dev,
     )
-
-
-# ---------------------------------------------------------------------------
-# Cemented surface reconciliation
-# ---------------------------------------------------------------------------
-
-
-def _reconcile_cemented_radius(r_from_elem1: float, r_from_elem2: float) -> float:
-    """Average the two independently-corrected values of the shared cemented surface.
-
-    When each element's radii are corrected independently (e.g. via
-    ``correct_radii_for_thickness``), the shared interface R₂ may end up with
-    slightly different values from each element's perspective.  This function
-    averages them to produce a single consistent radius for the cemented surface.
-
-    Parameters
-    ----------
-    r_from_elem1 :
-        R₂ as corrected from element 1's perspective.
-    r_from_elem2 :
-        R₂ as corrected from element 2's perspective.
-
-    Returns
-    -------
-    float
-        Arithmetic mean of the two radii.
-    """
-    return (r_from_elem1 + r_from_elem2) / 2.0
 
 
 # ---------------------------------------------------------------------------

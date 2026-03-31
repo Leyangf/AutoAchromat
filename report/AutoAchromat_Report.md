@@ -81,7 +81,7 @@ c:\MasterThesis\AutoAchromat\
 │       ├── glass_reader.py     # AGF file parsing (316 lines)
 │       ├── cemented.py         # Cemented doublet synthesis (198 lines)
 │       ├── spaced.py           # Air-spaced doublet synthesis (314 lines)
-│       ├── thickening.py       # Thin→thick conversion (664 lines)
+│       ├── thickening.py       # Thin→thick conversion (665 lines)
 │       ├── thermal.py          # Thermal analysis (257 lines)
 │       ├── pipeline.py         # Pipeline coordination (280 lines)
 │       ├── cli.py              # Command-line interface
@@ -789,9 +789,6 @@ _CORRECTION_ITER = 4         # number of EFL correction rounds
 _SCALE_EPS = 1e-12           # B_prod ≈ 0 threshold
 _EFL_TOL = 1e-9              # relative EFL convergence tolerance
 ```
-
-> **`_reconcile_cemented_radius`** (`thickening.py:648`): Averages the two independently-corrected values of the shared cemented surface $R_2$ (each element assigns its own corrected value after EFL scaling). `_reconcile_cemented_radius(50.0, 52.0) == 51.0`.
-
 ---
 
 ### 4.7 thermal.py — Thermal Analysis
@@ -1258,10 +1255,6 @@ User configuration (JSON / GUI)
 | `test_thickness.py` | `TestSag` | Positive/negative curvature; rejection when $\|R\| < a$ |
 | `test_thickness.py` | `TestCorrectRadiiPowerPreservation` | $\Phi_\text{thick} \approx \Phi_\text{thin}$ after correction |
 | `test_thickness.py` | `TestCorrectRadiiScale` | Scale factor $s$ near unity for typical lenses |
-| `test_thickness.py` | `TestReconcileCementedRadius` | ✓ `_reconcile_cemented_radius` averages shared cemented surface radii |
-
-> **Resolved**: `_reconcile_cemented_radius` was added to `thickening.py:648` after the initial report. The function averages the two independently-corrected values of the shared cemented surface: `_reconcile_cemented_radius(50.0, 52.0) == 51.0`. Tests pass.
-
 **Test fixtures**: All thermal tests use real SCHOTT AGF data (N-BK7, N-SF5 hand-coded coefficients verified against catalog). Tests in `test_thickness.py` use pure arithmetic and do not require the AGF files.
 
 > **Note — No dedicated Stage B tests**: The optimizer module (`optimizer.py`) does not have standalone unit tests. Stage B correctness was verified via integration testing (128/128 pipeline tests pass, 29–68% RMS improvement observed). Dedicated unit tests for `optimize_optic`, `_optical_fingerprint`, and `deduplicate_candidates` would improve regression coverage.
@@ -1331,8 +1324,6 @@ The core synthesis chain (`glass_reader` → `optics` → `cemented`/`spaced` �
 > - At $|W-W_0| = 3$: factor = 27; at 4: factor = 81. This dominates the PE ranking.
 > - Dimensional consistency: $P_2$ has units of $[\varphi^2 \cdot u^2]$ (power × angle²), $R_2^2$ in mm². Units should be checked.
 
-> **~~Priority — `_reconcile_cemented_radius` Missing~~** — ✓ **Resolved**: function added at `thickening.py:648`.
-
 > **Priority — Air-Spaced Doublet PE Interpretation**
 > `spaced.py:187`: `PE = sum(abs(x) for x in Ps) / 4.0`
 >
@@ -1363,7 +1354,6 @@ The core synthesis chain (`glass_reader` → `optics` → `cemented`/`spaced` �
 
 | Issue | Location | Severity |
 |-------|----------|:---:|
-| ~~`_reconcile_cemented_radius` missing~~ | `thickening.py:648` | ✓ **Resolved** (function added) |
 | formula\_id 9–12 silent fallback with no warning | `optics.py:111` | **High** (silent wrong results) |
 | `results.json` committed to git (noisy diffs) | root directory | Low |
 | GUI is ~1000 lines in a single file (logic and UI mixed) | `gui.py` | Low |
