@@ -94,8 +94,14 @@ def _make_material(elem: ElementRx) -> BaseMaterial:
 _RADIUS_DP = 6
 
 
+def _scalar(v) -> float:
+    """Coerce a value (possibly a 0-d or 1-element numpy array) to a Python float."""
+    return float(np.asarray(v).ravel()[0])
+
+
 def _safe_radius(r: float) -> float:
     """Round a radius value to ``_RADIUS_DP`` decimal places."""
+    r = _scalar(r)
     if not math.isfinite(r):
         return r
     return round(r, _RADIUS_DP)
@@ -266,7 +272,7 @@ def _build_cemented(rx: ThickPrescription) -> optic.Optic:
     op.add_surface(
         index=1,
         radius=R1,
-        thickness=e1.t_center,
+        thickness=_scalar(e1.t_center),
         material=mat1,
         is_stop=True,
     )
@@ -275,7 +281,7 @@ def _build_cemented(rx: ThickPrescription) -> optic.Optic:
     op.add_surface(
         index=2,
         radius=R2,
-        thickness=e2.t_center,
+        thickness=_scalar(e2.t_center),
         material=mat2,
     )
 
@@ -283,7 +289,7 @@ def _build_cemented(rx: ThickPrescription) -> optic.Optic:
     op.add_surface(
         index=3,
         radius=R3,
-        thickness=rx.back_focus_guess,
+        thickness=_scalar(rx.back_focus_guess),
     )
 
     # Surface 4 – Image plane
@@ -316,7 +322,7 @@ def _build_spaced(rx: ThickPrescription) -> optic.Optic:
     op.add_surface(
         index=1,
         radius=R1,
-        thickness=e1.t_center,
+        thickness=_scalar(e1.t_center),
         material=mat1,
         is_stop=True,
     )
@@ -325,14 +331,14 @@ def _build_spaced(rx: ThickPrescription) -> optic.Optic:
     op.add_surface(
         index=2,
         radius=R2,
-        thickness=rx.air_gap,
+        thickness=_scalar(rx.air_gap),
     )
 
     # Surface 3 – lens 2 front face
     op.add_surface(
         index=3,
         radius=R3,
-        thickness=e2.t_center,
+        thickness=_scalar(e2.t_center),
         material=mat2,
     )
 
@@ -340,7 +346,7 @@ def _build_spaced(rx: ThickPrescription) -> optic.Optic:
     op.add_surface(
         index=4,
         radius=R4,
-        thickness=rx.back_focus_guess,
+        thickness=_scalar(rx.back_focus_guess),
     )
 
     # Surface 5 – Image plane
@@ -359,21 +365,21 @@ def _configure_system(op: optic.Optic, rx: ThickPrescription) -> None:
     """Set aperture, field, wavelengths, and run image_solve."""
 
     # Aperture  –  entrance-pupil diameter = D
-    op.set_aperture(aperture_type="EPD", value=rx.D)
+    op.set_aperture(aperture_type="EPD", value=_scalar(rx.D))
 
     # Field  –  on-axis + off-axis for proper Seidel aberration evaluation.
     # Seidel CC, AC, PC, DC, TchC all depend on chief-ray height, which is
     # zero for on-axis only, making those aberrations identically 0.
     op.set_field_type(field_type="angle")
     op.add_field(y=0.0)
-    op.add_field(y=rx.half_field_angle)  # off-axis for aberration evaluation
+    op.add_field(y=_scalar(rx.half_field_angle))
 
     # Wavelengths  –  three spectral lines
     #   wavelengths = (lam1_short, lam0_primary, lam2_long)
     lam1, lam0, lam2 = rx.wavelengths
-    op.add_wavelength(value=lam1)  # short wavelength
-    op.add_wavelength(value=lam0, is_primary=True)  # primary / design
-    op.add_wavelength(value=lam2)  # long wavelength
+    op.add_wavelength(value=_scalar(lam1))
+    op.add_wavelength(value=_scalar(lam0), is_primary=True)
+    op.add_wavelength(value=_scalar(lam2))
 
     # Move image plane to paraxial focus
     op.image_solve()
