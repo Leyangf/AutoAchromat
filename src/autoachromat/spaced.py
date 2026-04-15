@@ -119,7 +119,7 @@ def _solve_Q_pairs(inputs: Inputs, c: dict) -> List[Tuple[float, float]]:
 # ---------------------------------------------------------------------------
 
 
-def _radii(
+def radii_from_Q_pair(
     inputs: Inputs, n1: float, n2: float, phi1: float, phi2: float, Q1: float, Q2: float
 ) -> Tuple[float, float, float, float]:
     f = inputs.fprime
@@ -239,7 +239,7 @@ def run_spaced(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
 
             for Q1, Q2 in pairs:
                 try:
-                    R1, R2, R3, R4 = _radii(inputs, n1, n2, phi1, phi2, Q1, Q2)
+                    R1, R2, R3, R4 = radii_from_Q_pair(inputs, n1, n2, phi1, phi2, Q1, Q2)
                     if not check_min_radius((R1, R2, R3, R4), inputs.D):
                         continue
 

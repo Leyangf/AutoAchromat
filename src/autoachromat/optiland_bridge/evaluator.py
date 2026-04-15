@@ -72,6 +72,7 @@ class OpticMetrics:
     # Chromatic
     LchC: Optional[float] = None  # longitudinal chromatic aberration
     TchC: Optional[float] = None  # transverse chromatic aberration
+    secondary_spectrum: Optional[float] = None  # BFD(λ₀) − avg(BFD(λ₁),BFD(λ₂)) [mm]
 
     # Thin-lens synthesis values (for comparison / ranking)
     PE: Optional[float] = None
@@ -121,6 +122,79 @@ def _patched_dispersion(ab, op, inputs: Inputs):
 
 
 # ---------------------------------------------------------------------------
+# Secondary spectrum via ABCD
+# ---------------------------------------------------------------------------
+
+
+def _bfd_at_wavelength(
+    rx, candidate: Candidate, lam_um: float,
+) -> float | None:
+    """Back focal distance at a single wavelength via ABCD matrix."""
+    from ..optics import refractive_index
+    from ..glass_reader import Glass
+    from ..thickening import (
+        _system_matrix_cemented, _system_matrix_spaced, _bfd_from_matrix,
+    )
+
+    if not candidate.cd1 or not candidate.cd2:
+        return None
+    if candidate.formula_id1 is None or candidate.formula_id2 is None:
+        return None
+
+    g1 = Glass(
+        name=candidate.glass1, catalog=candidate.catalog1,
+        formula_id=candidate.formula_id1, cd=candidate.cd1,
+    )
+    g2 = Glass(
+        name=candidate.glass2, catalog=candidate.catalog2,
+        formula_id=candidate.formula_id2, cd=candidate.cd2,
+    )
+
+    try:
+        n1 = refractive_index(g1, lam_um)
+        n2 = refractive_index(g2, lam_um)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+    e1, e2 = rx.elements
+
+    if rx.system_type == "cemented":
+        M = _system_matrix_cemented(
+            e1.R_front, e1.R_back, e2.R_back,
+            e1.t_center, e2.t_center, n1, n2,
+        )
+    else:
+        air_gap = rx.air_gap if rx.air_gap is not None else 1.0
+        M = _system_matrix_spaced(
+            e1.R_front, e1.R_back, e2.R_front, e2.R_back,
+            e1.t_center, e2.t_center, air_gap, n1, n2,
+        )
+
+    return _bfd_from_matrix(M)
+
+
+def _secondary_spectrum(
+    rx, candidate: Candidate, inputs: Inputs,
+) -> float | None:
+    """BFD(λ₀) − avg(BFD(λ₁), BFD(λ₂))  [mm].
+
+    Uses ABCD matrices with the candidate's dispersion data.
+    Returns None if dispersion data is unavailable.
+    """
+    if rx is None:
+        return None
+
+    bfd0 = _bfd_at_wavelength(rx, candidate, inputs.lam0)
+    bfd1 = _bfd_at_wavelength(rx, candidate, inputs.lam1)
+    bfd2 = _bfd_at_wavelength(rx, candidate, inputs.lam2)
+
+    if bfd0 is None or bfd1 is None or bfd2 is None:
+        return None
+
+    return bfd0 - (bfd1 + bfd2) / 2.0
+
+
+# ---------------------------------------------------------------------------
 # Single-candidate evaluation
 # ---------------------------------------------------------------------------
 
@@ -129,6 +203,7 @@ def evaluate(
     op: optic.Optic,
     candidate: Candidate,
     inputs: Inputs,
+    rx=None,
 ) -> OpticMetrics:
     """Extract performance metrics from an already-built ``Optic``.
 
@@ -215,6 +290,9 @@ def evaluate(
             # ---- Chromatic ----
             m.LchC = _scalar(ab.LchC())
             m.TchC = _scalar(ab.TchC())
+
+        # ---- Secondary spectrum (ABCD, independent of optiland) ----
+        m.secondary_spectrum = _secondary_spectrum(rx, candidate, inputs)
 
         m.success = True
 

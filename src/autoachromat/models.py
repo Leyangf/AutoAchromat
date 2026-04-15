@@ -39,6 +39,13 @@ class Inputs:
     # Half field angle [degrees] for off-axis evaluation in Stage B
     half_field_angle: float = 1.0
 
+    # Manufacturing minimum thickness [mm] (0 = auto from Table 10-3)
+    # te_min: min edge thickness for positive lenses
+    # tc_min: min centre thickness for negative lenses
+    # Auto values depend on D; GUI auto-fills from lookup tables.
+    te_min: float = 0.0
+    tc_min: float = 0.0
+
     # Stage B centre-thickness bounds [mm] (0 = auto)
     # Auto: t_min = manufacturing minimum, t_max = max(5×t_min, 20)
     # User values are clamped to respect manufacturing limits.

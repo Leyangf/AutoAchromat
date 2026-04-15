@@ -170,6 +170,9 @@ def element_thickness(
     R_back: float,
     D: float,
     n: float,
+    *,
+    te_min_override: float = 0.0,
+    tc_min_override: float = 0.0,
 ) -> tuple[float, float] | None:
     """Compute *(t_center, t_edge)* for a single lens element.
 
@@ -194,9 +197,9 @@ def element_thickness(
     # -- lens sign --
     phi = _lens_power(R_front, R_back, n)
 
-    # -- lookup limits --
-    te_min = lookup_t_edge_min(D)
-    tc_min_neg = lookup_t_center_min(D)
+    # -- lookup limits (user override or table) --
+    te_min = te_min_override if te_min_override > 0 else lookup_t_edge_min(D)
+    tc_min_neg = tc_min_override if tc_min_override > 0 else lookup_t_center_min(D)
 
     # -- centre thickness from edge-thickness constraint --
     #    t_edge = t_center − sag_f + sag_b  ≥  te_min
@@ -284,15 +287,8 @@ def _system_efl_cemented(
 
     Returns ``f' = -1/C`` where the system matrix is ``((A,B),(C,D))``.
     """
-    M = _refraction_matrix(R1, 1.0, n1)
-    M = _mat2_mul(_transfer_matrix(t1, n1), M)
-    M = _mat2_mul(_refraction_matrix(R2, n1, n2), M)
-    M = _mat2_mul(_transfer_matrix(t2, n2), M)
-    M = _mat2_mul(_refraction_matrix(R3, n2, 1.0), M)
-    C = M[1][0]
-    if abs(C) < 1e-15:
-        return float("inf")
-    return -1.0 / C
+    M = _system_matrix_cemented(R1, R2, R3, t1, t2, n1, n2)
+    return _efl_from_matrix(M)
 
 
 def _system_efl_spaced(
@@ -306,15 +302,23 @@ def _system_efl_spaced(
     n1: float,
     n2: float,
 ) -> float:
-    """Paraxial system EFL for an air-spaced doublet (ABCD matrix method).
+    """Paraxial system EFL for an air-spaced doublet (ABCD matrix method)."""
+    M = _system_matrix_spaced(R1, R2, R3, R4, t1, t2, air_gap, n1, n2)
+    return _efl_from_matrix(M)
 
-    Surface model::
 
-        air(1) \u2192 R1 \u2192 glass(n1), thickness t1
-               \u2192 R2 \u2192 air(1),    thickness air_gap
-               \u2192 R3 \u2192 glass(n2), thickness t2
-               \u2192 R4 \u2192 air(1)
-    """
+def _system_matrix_cemented(R1, R2, R3, t1, t2, n1, n2):
+    """ABCD system matrix for a cemented doublet."""
+    M = _refraction_matrix(R1, 1.0, n1)
+    M = _mat2_mul(_transfer_matrix(t1, n1), M)
+    M = _mat2_mul(_refraction_matrix(R2, n1, n2), M)
+    M = _mat2_mul(_transfer_matrix(t2, n2), M)
+    M = _mat2_mul(_refraction_matrix(R3, n2, 1.0), M)
+    return M
+
+
+def _system_matrix_spaced(R1, R2, R3, R4, t1, t2, air_gap, n1, n2):
+    """ABCD system matrix for an air-spaced doublet."""
     M = _refraction_matrix(R1, 1.0, n1)
     M = _mat2_mul(_transfer_matrix(t1, n1), M)
     M = _mat2_mul(_refraction_matrix(R2, n1, 1.0), M)
@@ -322,10 +326,23 @@ def _system_efl_spaced(
     M = _mat2_mul(_refraction_matrix(R3, 1.0, n2), M)
     M = _mat2_mul(_transfer_matrix(t2, n2), M)
     M = _mat2_mul(_refraction_matrix(R4, n2, 1.0), M)
+    return M
+
+
+def _efl_from_matrix(M) -> float:
+    """EFL = -1/C from a 2x2 ABCD system matrix."""
     C = M[1][0]
     if abs(C) < 1e-15:
         return float("inf")
     return -1.0 / C
+
+
+def _bfd_from_matrix(M) -> float:
+    """Back focal distance = -A/C from a 2x2 ABCD system matrix."""
+    C = M[1][0]
+    if abs(C) < 1e-15:
+        return float("inf")
+    return -M[0][0] / C
 
 
 # ---------------------------------------------------------------------------
@@ -365,17 +382,26 @@ def thicken_cemented(
     # Mutable local copies of radii (corrected in-place across iterations)
     R1, R2, R3 = cand.radii[0], cand.radii[1], cand.radii[2]
 
+    te_ov = getattr(inp, "te_min", 0.0)
+    tc_ov = getattr(inp, "tc_min", 0.0)
+
     t1 = te1 = t2 = te2 = 0.0
     actual_efl: float = math.nan
 
     for _iter in range(_CORRECTION_ITER + 1):
         # --- assign physical thicknesses ---
-        result1 = element_thickness(R1, R2, inp.D, cand.n1)
+        result1 = element_thickness(
+            R1, R2, inp.D, cand.n1,
+            te_min_override=te_ov, tc_min_override=tc_ov,
+        )
         if result1 is None:
             return None
         t1, te1 = result1
 
-        result2 = element_thickness(R2, R3, inp.D, cand.n2)
+        result2 = element_thickness(
+            R2, R3, inp.D, cand.n2,
+            te_min_override=te_ov, tc_min_override=tc_ov,
+        )
         if result2 is None:
             return None
         t2, te2 = result2
@@ -461,17 +487,26 @@ def thicken_spaced(
     air_gap = inp.air_gap
     a = inp.D / 2.0
 
+    te_ov = getattr(inp, "te_min", 0.0)
+    tc_ov = getattr(inp, "tc_min", 0.0)
+
     t1 = te1 = t2 = te2 = 0.0
     actual_efl: float = math.nan
 
     for _iter in range(_CORRECTION_ITER + 1):
         # --- assign physical thicknesses ---
-        result1 = element_thickness(R1, R2, inp.D, cand.n1)
+        result1 = element_thickness(
+            R1, R2, inp.D, cand.n1,
+            te_min_override=te_ov, tc_min_override=tc_ov,
+        )
         if result1 is None:
             return None
         t1, te1 = result1
 
-        result2 = element_thickness(R3, R4, inp.D, cand.n2)
+        result2 = element_thickness(
+            R3, R4, inp.D, cand.n2,
+            te_min_override=te_ov, tc_min_override=tc_ov,
+        )
         if result2 is None:
             return None
         t2, te2 = result2
