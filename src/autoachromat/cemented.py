@@ -50,7 +50,7 @@ def _coma_W(n1: float, n2: float, phi1: float, phi2: float, Q: float) -> float:
     return K * Q + L
 
 
-def _radii(
+def radii_from_Q(
     inputs: Inputs, n1: float, n2: float, phi1: float, Q: float
 ) -> Tuple[float, float, float]:
     # Your spec:
@@ -119,7 +119,7 @@ def run_cemented(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
             for Q in _solve_Q_roots(n1, n2, phi1, phi2, inputs.P0):
                 try:
                     W = _coma_W(n1, n2, phi1, phi2, Q)
-                    R1, R2, R3 = _radii(inputs, n1, n2, phi1, Q)
+                    R1, R2, R3 = radii_from_Q(inputs, n1, n2, phi1, Q)
 
                     if not check_min_radius((R1, R2, R3), inputs.D):
                         continue

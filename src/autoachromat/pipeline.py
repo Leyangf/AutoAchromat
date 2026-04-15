@@ -18,6 +18,7 @@ from .models import Candidate, Inputs, ThickPrescription
 from .cemented import run_cemented
 from .spaced import run_spaced
 from .thickening import thicken
+from .seidel_refine import refine_seidel
 from .optiland_bridge.builder import (
     build_optic_from_prescription,
     rx_from_optic,
@@ -138,6 +139,9 @@ def process_candidate(
         )
         return PipelineResult(cand, None, m)
 
+    # -- Step 1.5: Thickness-aware Seidel refinement --
+    rx = refine_seidel(rx, cand, inputs)
+
     # -- Step 2: Build optiland Optic --
     op = build_optic_from_prescription(rx)
     build_ms = (time.perf_counter() - t0) * 1000.0
@@ -157,7 +161,7 @@ def process_candidate(
         return PipelineResult(cand, rx, m)
 
     # -- Step 3: Evaluate (ray tracing + aberrations) --
-    m = evaluate(op, cand, inputs)
+    m = evaluate(op, cand, inputs, rx=rx)
     m.build_time_ms = build_ms
     return PipelineResult(cand, rx, m)
 
@@ -323,7 +327,7 @@ def process_candidate_stage_b(
         rx_b = rx_a  # read-back failed; keep Stage-A prescription
 
     # -- Step 5: Evaluate --
-    m = evaluate(op_b, cand, inputs)
+    m = evaluate(op_b, cand, inputs, rx=rx_b)
     m.build_time_ms = build_ms
     return PipelineResult(cand, rx_b, m)
 

@@ -92,6 +92,16 @@ _PAD: dict[str, Any] = dict(padx=6, pady=3)
 class AutoAchromatGUI(tk.Tk):
     """Main GUI window for AutoAchromat."""
 
+    # (name, lam1_nm, lam0_nm, lam2_nm)
+    _WL_PRESETS = [
+        ("Visible d/F/C", 486.13, 587.56, 656.27),
+        ("Visible e/F'/C'", 479.99, 546.07, 643.85),
+        ("NIR (0.8-1.0)", 800, 900, 1000),
+        ("SWIR (1.0-1.7)", 1000, 1350, 1700),
+        ("MWIR (3-5)", 3000, 4000, 5000),
+        ("LWIR (8-12)", 8000, 10000, 12000),
+    ]
+
     def __init__(self) -> None:
         super().__init__()
         self.title("AutoAchromat – Doublet Designer")
@@ -166,30 +176,51 @@ class AutoAchromatGUI(tk.Tk):
             row=r, column=1, sticky=tk.W, **_PAD
         )
         ttk.Label(frame, text="D [mm]:").grid(row=r, column=2, sticky=tk.E, **_PAD)
+        d_frame = ttk.Frame(frame)
+        d_frame.grid(row=r, column=3, sticky=tk.W, **_PAD)
         self._var_D = tk.DoubleVar(value=50.0)
-        ttk.Entry(frame, textvariable=self._var_D, width=9).grid(
-            row=r, column=3, sticky=tk.W, **_PAD
+        ttk.Entry(d_frame, textvariable=self._var_D, width=9).pack(side=tk.LEFT)
+        self._var_fno_display = tk.StringVar(value="F/4.0")
+        ttk.Label(d_frame, textvariable=self._var_fno_display, width=7).pack(
+            side=tk.LEFT, padx=(4, 0),
         )
-        ttk.Label(frame, text="λ₀ [µm]:").grid(row=r, column=4, sticky=tk.E, **_PAD)
-        self._var_lam0 = tk.DoubleVar(value=0.58756)
-        ttk.Entry(frame, textvariable=self._var_lam0, width=9).grid(
-            row=r, column=5, sticky=tk.W, **_PAD
+        self._var_fprime.trace_add("write", lambda *_: self._update_fno_display())
+        self._var_D.trace_add("write", lambda *_: self._update_fno_display())
+
+        # Wavelengths in nm: preset dropdown + editable λ₁ λ₀ λ₂
+        ttk.Label(frame, text="λ [nm]:").grid(row=r, column=4, sticky=tk.E, **_PAD)
+        wl_frame = ttk.Frame(frame)
+        wl_frame.grid(row=r, column=5, columnspan=5, sticky=tk.W, **_PAD)
+
+        self._var_wl_preset = tk.StringVar(value="Visible d/F/C")
+        wl_combo = ttk.Combobox(
+            wl_frame, textvariable=self._var_wl_preset, width=14,
+            state="readonly",
+            values=[name for name, *_ in self._WL_PRESETS],
         )
-        ttk.Label(frame, text="λ₁ [µm]:").grid(row=r, column=6, sticky=tk.E, **_PAD)
-        self._var_lam1 = tk.DoubleVar(value=0.48613)
-        ttk.Entry(frame, textvariable=self._var_lam1, width=9).grid(
-            row=r, column=7, sticky=tk.W, **_PAD
+        wl_combo.pack(side=tk.LEFT, padx=(0, 6))
+        wl_combo.bind("<<ComboboxSelected>>", lambda _: self._on_wl_preset())
+
+        self._var_lam1_nm = tk.DoubleVar(value=486.13)
+        self._var_lam0_nm = tk.DoubleVar(value=587.56)
+        self._var_lam2_nm = tk.DoubleVar(value=656.27)
+        ttk.Label(wl_frame, text="λ₁").pack(side=tk.LEFT)
+        ttk.Entry(wl_frame, textvariable=self._var_lam1_nm, width=7).pack(
+            side=tk.LEFT, padx=1
         )
-        ttk.Label(frame, text="λ₂ [µm]:").grid(row=r, column=8, sticky=tk.E, **_PAD)
-        self._var_lam2 = tk.DoubleVar(value=0.65627)
-        ttk.Entry(frame, textvariable=self._var_lam2, width=9).grid(
-            row=r, column=9, sticky=tk.W, **_PAD
+        ttk.Label(wl_frame, text="λ₀").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Entry(wl_frame, textvariable=self._var_lam0_nm, width=7).pack(
+            side=tk.LEFT, padx=1
+        )
+        ttk.Label(wl_frame, text="λ₂").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Entry(wl_frame, textvariable=self._var_lam2_nm, width=7).pack(
+            side=tk.LEFT, padx=1
         )
 
         r = 1
         ttk.Label(frame, text="Type:").grid(row=r, column=0, sticky=tk.E, **_PAD)
         type_frame = ttk.Frame(frame)
-        type_frame.grid(row=r, column=1, columnspan=3, sticky=tk.W, **_PAD)
+        type_frame.grid(row=r, column=1, sticky=tk.W, **_PAD)
         self._var_type = tk.StringVar(value="cemented")
         ttk.Radiobutton(
             type_frame, text="Cemented", variable=self._var_type,
@@ -200,18 +231,18 @@ class AutoAchromatGUI(tk.Tk):
             value="spaced", command=self._on_type_changed,
         ).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(frame, text="Top-N:").grid(row=r, column=4, sticky=tk.E, **_PAD)
-        self._var_N = tk.IntVar(value=20)
-        ttk.Entry(frame, textvariable=self._var_N, width=9).grid(
-            row=r, column=5, sticky=tk.W, **_PAD
+        ttk.Label(frame, text="Field [°]:").grid(row=r, column=2, sticky=tk.E, **_PAD)
+        self._var_half_field = tk.DoubleVar(value=1.0)
+        ttk.Entry(frame, textvariable=self._var_half_field, width=9).grid(
+            row=r, column=3, sticky=tk.W, **_PAD
         )
 
-        ttk.Label(frame, text="Catalogs:").grid(row=r, column=6, sticky=tk.E, **_PAD)
+        ttk.Label(frame, text="Catalogs:").grid(row=r, column=4, sticky=tk.E, **_PAD)
         cat_frame = ttk.Frame(frame)
-        cat_frame.grid(row=r, column=7, columnspan=3, sticky=tk.W, **_PAD)
+        cat_frame.grid(row=r, column=5, columnspan=5, sticky=tk.W, **_PAD)
         self._var_cat_display = tk.StringVar(value="(none)")
         ttk.Label(
-            cat_frame, textvariable=self._var_cat_display, width=24, relief="sunken"
+            cat_frame, textvariable=self._var_cat_display, width=40, relief="sunken"
         ).pack(side=tk.LEFT)
         ttk.Button(cat_frame, text="+", width=3, command=self._add_catalog).pack(
             side=tk.LEFT, padx=2
@@ -219,10 +250,6 @@ class AutoAchromatGUI(tk.Tk):
         ttk.Button(cat_frame, text="−", width=3, command=self._clear_catalogs).pack(
             side=tk.LEFT, padx=2
         )
-        self._btn_load = ttk.Button(
-            cat_frame, text="Load", width=5, command=self._on_load_config
-        )
-        self._btn_load.pack(side=tk.LEFT, padx=(8, 2))
 
     # ------------------------------------------------------------------
     # Stage A (left) and Stage B (right)
@@ -248,6 +275,11 @@ class AutoAchromatGUI(tk.Tk):
         ttk.Entry(frame, textvariable=self._var_W0, width=8).grid(
             row=r, column=5, sticky=tk.W, **_PAD
         )
+        ttk.Label(frame, text="Top-N:").grid(row=r, column=6, sticky=tk.E, **_PAD)
+        self._var_N = tk.IntVar(value=20)
+        ttk.Entry(frame, textvariable=self._var_N, width=6).grid(
+            row=r, column=7, sticky=tk.W, **_PAD
+        )
 
         r = 1
         ttk.Label(frame, text="Δν min:").grid(row=r, column=0, sticky=tk.E, **_PAD)
@@ -265,24 +297,38 @@ class AutoAchromatGUI(tk.Tk):
         self._ent_air_gap = ttk.Entry(frame, textvariable=self._var_air_gap, width=8)
         self._ent_air_gap.grid(row=r, column=5, sticky=tk.W, **_PAD)
         self._ent_air_gap.configure(state=tk.DISABLED)
+
+        r = 2
+        ttk.Label(frame, text="te min [mm]:").grid(row=r, column=0, sticky=tk.E, **_PAD)
+        self._var_te_min = tk.DoubleVar(value=0.0)
+        ttk.Entry(frame, textvariable=self._var_te_min, width=8).grid(
+            row=r, column=1, sticky=tk.W, **_PAD
+        )
+        ttk.Label(frame, text="tc min [mm]:").grid(row=r, column=2, sticky=tk.E, **_PAD)
+        self._var_tc_min = tk.DoubleVar(value=0.0)
+        ttk.Entry(frame, textvariable=self._var_tc_min, width=8).grid(
+            row=r, column=3, sticky=tk.W, **_PAD
+        )
+        ttk.Button(
+            frame, text="Auto", width=5, command=self._auto_fill_thickness,
+        ).grid(row=r, column=4, sticky=tk.W, **_PAD)
+
         self._btn_run = ttk.Button(
             frame, text=" ▶ Run Stage A ", command=self._on_run
         )
-        self._btn_run.grid(row=r, column=6, sticky=tk.E, padx=6, pady=3)
+        self._btn_run.grid(row=r, column=6, columnspan=2, sticky=tk.E, padx=6, pady=3)
+
+        # Auto-fill manufacturing thickness from D on startup
+        self._auto_fill_thickness()
 
     def _build_stage_b_frame(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text=" Stage B: Thick-Lens Optimisation (0 = auto) ")
         frame.grid(row=0, column=1, sticky="nsew", **_PAD)
 
         r = 0
-        ttk.Label(frame, text="Field [°]:").grid(row=r, column=0, sticky=tk.E, **_PAD)
-        self._var_half_field = tk.DoubleVar(value=1.0)
-        ttk.Entry(frame, textvariable=self._var_half_field, width=6).grid(
-            row=r, column=1, sticky=tk.W, **_PAD
-        )
-        ttk.Label(frame, text="Air gap [mm]:").grid(row=r, column=2, sticky=tk.E, **_PAD)
+        ttk.Label(frame, text="Air gap [mm]:").grid(row=r, column=0, sticky=tk.E, **_PAD)
         rng_gap = ttk.Frame(frame)
-        rng_gap.grid(row=r, column=3, sticky=tk.W, **_PAD)
+        rng_gap.grid(row=r, column=1, sticky=tk.W, **_PAD)
         self._var_gap_min = tk.DoubleVar(value=0.0)
         self._ent_gap_min = ttk.Entry(rng_gap, textvariable=self._var_gap_min, width=5)
         self._ent_gap_min.pack(side=tk.LEFT)
@@ -340,6 +386,16 @@ class AutoAchromatGUI(tk.Tk):
             side=tk.LEFT, fill=tk.Y, padx=8, pady=2
         )
 
+        self._btn_filter_shape = ttk.Button(
+            bar, text="Filter Extreme Shapes",
+            command=self._on_filter_shapes, state=tk.DISABLED,
+        )
+        self._btn_filter_shape.pack(side=tk.LEFT, **_PAD)
+
+        ttk.Separator(bar, orient=tk.VERTICAL).pack(
+            side=tk.LEFT, fill=tk.Y, padx=8, pady=2
+        )
+
         self._progress = ttk.Progressbar(bar, length=200, mode="determinate")
         self._progress.pack(side=tk.LEFT, **_PAD)
 
@@ -348,6 +404,28 @@ class AutoAchromatGUI(tk.Tk):
             side=tk.LEFT, fill=tk.X, expand=True, **_PAD
         )
 
+    def _on_wl_preset(self) -> None:
+        """Fill wavelength entries from the selected preset."""
+        name = self._var_wl_preset.get()
+        for preset_name, lam1, lam0, lam2 in self._WL_PRESETS:
+            if preset_name == name:
+                self._var_lam1_nm.set(lam1)
+                self._var_lam0_nm.set(lam0)
+                self._var_lam2_nm.set(lam2)
+                break
+
+    def _update_fno_display(self) -> None:
+        """Refresh the F/# label from current f' and D."""
+        try:
+            fprime = self._var_fprime.get()
+            D = self._var_D.get()
+            if D > 0:
+                self._var_fno_display.set(f"F/{fprime / D:.1f}")
+            else:
+                self._var_fno_display.set("")
+        except tk.TclError:
+            self._var_fno_display.set("")
+
     def _on_type_changed(self) -> None:
         """Enable/disable spaced-only fields based on system type."""
         is_spaced = self._var_type.get() == "spaced"
@@ -355,6 +433,19 @@ class AutoAchromatGUI(tk.Tk):
         self._ent_air_gap.configure(state=state)
         self._ent_gap_min.configure(state=state)
         self._ent_gap_max.configure(state=state)
+
+    def _auto_fill_thickness(self) -> None:
+        """Fill te_min / tc_min from Table 10-3 based on current D."""
+        from .thickening import lookup_t_edge_min, lookup_t_center_min
+
+        try:
+            D = self._var_D.get()
+        except tk.TclError:
+            return
+        if D <= 0:
+            return
+        self._var_te_min.set(round(lookup_t_edge_min(D), 2))
+        self._var_tc_min.set(round(lookup_t_center_min(D), 2))
 
     # ------------------------------------------------------------------
     # ③ Results table
@@ -374,6 +465,7 @@ class AutoAchromatGUI(tk.Tk):
         ("GEO [µm]", "geo", 70, tk.E),
         ("SA", "sa", 70, tk.E),
         ("LchC", "lchc", 70, tk.E),
+        ("2nd Sp [mm]", "ss", 75, tk.E),
         ("TchC", "tchc", 70, tk.E),
         ("PE", "pe", 60, tk.E),
         ("α_h [ppm/K]", "alpha_h", 85, tk.E),
@@ -425,8 +517,8 @@ class AutoAchromatGUI(tk.Tk):
         )
         self._detail_rx.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
-        # Middle: Aberrations
-        mid = ttk.LabelFrame(frame, text="Aberrations")
+        # Middle: Aberrations & Thermal
+        mid = ttk.LabelFrame(frame, text="Aberrations & Thermal")
         mid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=2)
         self._detail_ab = tk.Text(
             mid, height=10, width=35, font=("Consolas", 9), state=tk.DISABLED
@@ -484,66 +576,14 @@ class AutoAchromatGUI(tk.Tk):
             self._var_cat_display.set(", ".join(names))
 
     # ===================================================================
-    # Load config
-    # ===================================================================
-
-    def _on_load_config(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Select config JSON",
-            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            d = json.loads(Path(path).read_text(encoding="utf-8"))
-        except Exception as e:
-            messagebox.showerror("Config Error", str(e))
-            return
-
-        # Fill fields
-        self._var_fprime.set(d.get("fprime", 200.0))
-        self._var_D.set(d.get("D", 50.0))
-        self._var_lam0.set(d.get("lam0", 0.58756))
-        self._var_lam1.set(d.get("lam1", 0.48613))
-        self._var_lam2.set(d.get("lam2", 0.65627))
-        self._var_C0.set(d.get("C0", 0.0))
-        self._var_P0.set(d.get("P0", 0.0))
-        self._var_W0.set(d.get("W0", 0.0))
-        self._var_min_dnu.set(d.get("min_delta_nu", 10.0))
-        self._var_max_PE.set(d.get("max_PE", 100.0))
-        self._var_N.set(d.get("N", 20))
-        self._var_type.set(d.get("system_type", "cemented"))
-        self._var_air_gap.set(d.get("air_gap", 1.0))
-        self._var_half_field.set(d.get("half_field_angle", 1.0))
-        self._var_t1_min.set(d.get("t1_min", 0.0))
-        self._var_t1_max.set(d.get("t1_max", 0.0))
-        self._var_t2_min.set(d.get("t2_min", 0.0))
-        self._var_t2_max.set(d.get("t2_max", 0.0))
-        self._var_gap_min.set(d.get("gap_min", 0.0))
-        self._var_gap_max.set(d.get("gap_max", 0.0))
-        self._on_type_changed()
-
-        # Catalog paths (resolve relative to config dir)
-        config_dir = Path(path).resolve().parent
-        self._catalog_paths.clear()
-        for cp in d.get("catalogs", []):
-            pp = Path(cp)
-            if not pp.is_absolute():
-                pp = config_dir / pp
-            self._catalog_paths.append(str(pp.resolve()))
-        self._refresh_catalog_display()
-
-        self._var_status.set(f"Loaded config: {Path(path).name}")
-
-    # ===================================================================
     # Build Inputs from GUI fields
     # ===================================================================
 
     def _make_inputs(self) -> Inputs:
         return Inputs(
-            lam0=self._var_lam0.get(),
-            lam1=self._var_lam1.get(),
-            lam2=self._var_lam2.get(),
+            lam0=self._var_lam0_nm.get() / 1000.0,
+            lam1=self._var_lam1_nm.get() / 1000.0,
+            lam2=self._var_lam2_nm.get() / 1000.0,
             D=self._var_D.get(),
             fprime=self._var_fprime.get(),
             C0=self._var_C0.get(),
@@ -555,6 +595,8 @@ class AutoAchromatGUI(tk.Tk):
             system_type=self._var_type.get(),  # type: ignore[arg-type]
             air_gap=self._var_air_gap.get(),
             half_field_angle=self._var_half_field.get(),
+            te_min=self._var_te_min.get(),
+            tc_min=self._var_tc_min.get(),
             t1_min=self._var_t1_min.get(),
             t1_max=self._var_t1_max.get(),
             t2_min=self._var_t2_min.get(),
@@ -576,21 +618,32 @@ class AutoAchromatGUI(tk.Tk):
             )
             return
 
+        # Build Inputs on the main thread (tkinter vars are not thread-safe)
+        try:
+            inputs = self._make_inputs()
+        except Exception as e:
+            messagebox.showerror("Input Error", str(e))
+            return
+
         self._running = True
         self._btn_run.configure(state=tk.DISABLED)
         self._btn_export_json.configure(state=tk.DISABLED)
         self._btn_export_csv.configure(state=tk.DISABLED)
+        self._btn_stage_b.configure(state=tk.DISABLED)
+        self._btn_filter_shape.configure(state=tk.DISABLED)
         self._results.clear()
         self._clear_tree()
         self._clear_details()
+        self._var_status.set("Running design pipeline...")
 
-        thread = threading.Thread(target=self._run_pipeline, daemon=True)
+        thread = threading.Thread(
+            target=self._run_pipeline, args=(inputs,), daemon=True,
+        )
         thread.start()
 
-    def _run_pipeline(self) -> None:
+    def _run_pipeline(self, inputs: Inputs) -> None:
         """Execute full pipeline in a background thread."""
         try:
-            inputs = self._make_inputs()
 
             self._set_status("Running design pipeline...")
 
@@ -633,6 +686,60 @@ class AutoAchromatGUI(tk.Tk):
             self._btn_export_json.configure(state=tk.NORMAL)
             self._btn_export_csv.configure(state=tk.NORMAL)
             self._btn_stage_b.configure(state=tk.NORMAL)
+            self._btn_filter_shape.configure(state=tk.NORMAL)
+
+    # ------------------------------------------------------------------
+    # Shape filter
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_extreme_shape(row: "ResultRow") -> bool:
+        """Return True if any element has a problematic shape for manufacturing.
+
+        Criteria (any triggers rejection)
+        ----------------------------------
+        For spaced doublets:
+        - Meniscus (both radii same sign) with convex side facing the
+          air gap.  Elem 1: both R < 0; Elem 2: both R > 0.
+        For all types:
+        - Near-hemispherical surface  |R| < semi_aperture * 1.2
+        """
+        rx = row.rx
+        if rx is None:
+            return False
+
+        semi_ap = rx.D / 2.0
+        r_min = semi_ap * 1.2
+
+        # Near-hemispherical check
+        for elem in rx.elements:
+            for R in (elem.R_front, elem.R_back):
+                if abs(R) < r_min:
+                    return True
+
+        # Meniscus with convex facing the air gap (spaced only)
+        if rx.system_type == "spaced" and len(rx.elements) == 2:
+            e1, e2 = rx.elements
+            if e1.R_front < 0 and e1.R_back < 0:
+                return True
+            if e2.R_front > 0 and e2.R_back > 0:
+                return True
+
+        return False
+
+    def _on_filter_shapes(self) -> None:
+        """Remove results with meniscus-convex-facing-gap or near-hemispherical shapes."""
+        before = len(self._results)
+        self._results = [r for r in self._results if not self._is_extreme_shape(r)]
+        after = len(self._results)
+        removed = before - after
+        self._refresh_tree()
+        self._clear_details()
+        self._var_status.set(
+            f"Shape filter: removed {removed}, kept {after} of {before} results"
+        )
+        if not self._results:
+            self._btn_filter_shape.configure(state=tk.DISABLED)
 
     # ------------------------------------------------------------------
     # Stage B: thick-lens optimisation
@@ -669,19 +776,27 @@ class AutoAchromatGUI(tk.Tk):
             )
             return
 
+        # Build Inputs on the main thread (tkinter vars are not thread-safe)
+        try:
+            inputs = self._make_inputs()
+        except Exception as e:
+            messagebox.showerror("Input Error", str(e))
+            return
+
         self._running = True
         self._btn_run.configure(state=tk.DISABLED)
         self._btn_stage_b.configure(state=tk.DISABLED)
+        self._btn_filter_shape.configure(state=tk.DISABLED)
 
         self._stage_b_selected = selected_rows
-        thread = threading.Thread(target=self._run_stage_b_bg, daemon=True)
+        thread = threading.Thread(
+            target=self._run_stage_b_bg, args=(inputs,), daemon=True,
+        )
         thread.start()
 
-    def _run_stage_b_bg(self) -> None:
+    def _run_stage_b_bg(self, inputs: Inputs) -> None:
         """Execute Stage B optimisation in a background thread."""
         try:
-            inputs = self._make_inputs()
-
             selected_results = [r.result for r in self._stage_b_selected]
             n_sel = len(selected_results)
 
@@ -722,6 +837,8 @@ class AutoAchromatGUI(tk.Tk):
         self._running = False
         self._btn_run.configure(state=tk.NORMAL)
         self._btn_stage_b.configure(state=tk.NORMAL)
+        if self._results:
+            self._btn_filter_shape.configure(state=tk.NORMAL)
 
     # ===================================================================
     # Thread-safe UI updates
@@ -776,6 +893,7 @@ class AutoAchromatGUI(tk.Tk):
             _fmt(m.geo_spot_radius, ".2f"),
             _fmt(m.SA, ".3f"),
             _fmt(m.LchC, ".3f"),
+            _fmt(m.secondary_spectrum, ".4f") if m.secondary_spectrum is not None else "—",
             _fmt(m.TchC, ".3f"),
             _fmt(m.PE, ".2f"),
             alpha_h,
@@ -827,6 +945,11 @@ class AutoAchromatGUI(tk.Tk):
         ),
         "sa": lambda r: abs(r.metrics.SA) if r.metrics.SA is not None else 1e9,
         "lchc": lambda r: abs(r.metrics.LchC) if r.metrics.LchC is not None else 1e9,
+        "ss": lambda r: (
+            abs(r.metrics.secondary_spectrum)
+            if r.metrics.secondary_spectrum is not None
+            else 1e9
+        ),
         "tchc": lambda r: abs(r.metrics.TchC) if r.metrics.TchC is not None else 1e9,
         "pe": lambda r: abs(r.metrics.PE) if r.metrics.PE is not None else 1e9,
         "alpha_h": lambda r: (
@@ -956,6 +1079,7 @@ class AutoAchromatGUI(tk.Tk):
         lines.append("  ───────────────────────")
         lines.append(f"  LchC (longit.):   {_fmt(m.LchC, '.4f')}")
         lines.append(f"  TchC (transv.):   {_fmt(m.TchC, '.4f')}")
+        lines.append(f"  2nd spectrum:     {_fmt(m.secondary_spectrum, '.4f')} mm")
         lines.append("")
         lines.append("  Spot Diagram")
         lines.append("  ───────────────────────")
@@ -976,6 +1100,30 @@ class AutoAchromatGUI(tk.Tk):
             lines.append(f"  EFL (ABCD):     {rx.actual_efl:.3f} mm")
             lines.append(f"  EFL (optiland): {_fmt(m.efl, '.3f')} mm")
             lines.append(f"  Deviation:      {dev_pct:+.3f} %")
+
+        # Thermal analysis
+        cand = row.cand
+        th = cand.thermal
+        lines.append("")
+        lines.append("  Thermal Analysis")
+        lines.append("  ───────────────────────")
+        if th is None or not th.thermal_data_available:
+            lines.append("  (no TD/ED data in catalog)")
+        else:
+            lines.append(f"  dn/dT₁:  {_fmt(th.dn_dT_1, '.3e')} /K  ({cand.glass1})")
+            lines.append(f"  dn/dT₂:  {_fmt(th.dn_dT_2, '.3e')} /K  ({cand.glass2})")
+            v1_ppm = th.V1 * 1e6 if th.V1 is not None else None
+            v2_ppm = th.V2 * 1e6 if th.V2 is not None else None
+            lines.append(f"  V₁:      {_fmt(v1_ppm, '.2f')} ppm/K")
+            lines.append(f"  V₂:      {_fmt(v2_ppm, '.2f')} ppm/K")
+            dphi_ppm = th.dphi_dT_norm * 1e6 if th.dphi_dT_norm is not None else None
+            lines.append(f"  dΦ/dT:   {_fmt(dphi_ppm, '.2f')} ppm/K")
+            alpha_ppm = (
+                th.alpha_housing_required * 1e6
+                if th.alpha_housing_required is not None
+                else None
+            )
+            lines.append(f"  α_h req: {_fmt(alpha_ppm, '.2f')} ppm/K")
 
         w.insert(tk.END, "\n".join(lines))
         w.configure(state=tk.DISABLED)
@@ -998,7 +1146,7 @@ class AutoAchromatGUI(tk.Tk):
         if rx is not None:
             e1, e2 = rx.elements
             lines.append("")
-            lines.append("  Thick-lens Radii (unchanged)")
+            lines.append("  Thick-lens Radii (EFL-corrected)")
             lines.append("  ─────────────────────────")
             if rx.system_type == "cemented":
                 lines.append(f"  R1 = {e1.R_front:12.4f} mm")
@@ -1020,29 +1168,6 @@ class AutoAchromatGUI(tk.Tk):
             lines.append(f"  Outside dia φ: {rx.D:.1f} mm")
         else:
             lines.append("\n  (thickening failed)")
-
-        # Thermal analysis
-        th = cand.thermal
-        lines.append("")
-        lines.append("  Thermal Analysis")
-        lines.append("  ─────────────────────────")
-        if th is None or not th.thermal_data_available:
-            lines.append("  (no TD/ED data in catalog)")
-        else:
-            lines.append(f"  dn/dT₁:  {_fmt(th.dn_dT_1, '.3e')} /K  ({cand.glass1})")
-            lines.append(f"  dn/dT₂:  {_fmt(th.dn_dT_2, '.3e')} /K  ({cand.glass2})")
-            v1_ppm = th.V1 * 1e6 if th.V1 is not None else None
-            v2_ppm = th.V2 * 1e6 if th.V2 is not None else None
-            lines.append(f"  V₁:      {_fmt(v1_ppm, '.2f')} ppm/K")
-            lines.append(f"  V₂:      {_fmt(v2_ppm, '.2f')} ppm/K")
-            dphi_ppm = th.dphi_dT_norm * 1e6 if th.dphi_dT_norm is not None else None
-            lines.append(f"  dΦ/dT:   {_fmt(dphi_ppm, '.2f')} ppm/K")
-            alpha_ppm = (
-                th.alpha_housing_required * 1e6
-                if th.alpha_housing_required is not None
-                else None
-            )
-            lines.append(f"  α_h req: {_fmt(alpha_ppm, '.2f')} ppm/K")
 
         w.insert(tk.END, "\n".join(lines))
         w.configure(state=tk.DISABLED)
