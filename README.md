@@ -79,7 +79,7 @@ Select one or more rows in the results table and click **Optimize**. This runs a
 
 ## Glass Catalogs
 
-The repo includes OHARA and CDGM catalogs in `data/catalogs/`. To add Schott glasses, copy `SCHOTT.AGF` from your Zemax installation to `data/catalogs/`.
+The repo includes Schott, OHARA and CDGM catalogs in `data/catalogs/`. To add other glasses, copy e.g.`SCHOTT.AGF` from your Zemax installation to `data/catalogs/`.
 
 ## Running Tests
 
