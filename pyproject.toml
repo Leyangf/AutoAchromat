@@ -9,11 +9,15 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy",
     "optiland",
+    "scipy",
 ]
 
 [project.scripts]
 autoachromat = "autoachromat.cli:main"
 autoachromat-gui = "autoachromat.gui:main"
+
+[dependency-groups]
+dev = ["pytest"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
