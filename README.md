@@ -2,18 +2,23 @@
 
 Automated achromatic doublet lens designer. Generates cemented and air-spaced doublet initial structures from glass catalogs, evaluates optical performance via ray tracing, and exports designs for further optimization in Zemax or other optical design software.
 
-| Cemented Doublet | Air-Spaced Doublet |
-|---|---|
-| ![Cemented](example/cemented_example.png) | ![Spaced](example/spaced_example.png) |
+**Cemented Doublet**
+
+![Cemented doublet example](example/cemented_example.png)
+
+**Air-Spaced Doublet**
+
+![Air-spaced doublet example](example/spaced_example.png)
 
 ## What It Does
 
 1. Reads industry-standard AGF glass catalogs (SCHOTT, OHARA, CDGM, etc.)
 2. Automatically searches all valid glass pair combinations
-3. Produces thick-lens prescriptions with manufacturing-feasible thicknesses
-4. Evaluates each design: spot size, Seidel aberrations, chromatic errors, secondary spectrum, thermal stability
-5. Optionally refines designs via built-in numerical optimizer (optiland, experimental)
-6. Exports the best candidates as `.zmx` (Zemax), JSON, or CSV
+3. Supports user-defined aberration targets (spherical aberration, coma, chromatic) via Advanced settings
+4. Produces thick-lens prescriptions with manufacturing-feasible thicknesses
+5. Evaluates each design: spot size, Seidel aberrations, chromatic errors, secondary spectrum, thermal stability
+6. Optionally refines designs via built-in numerical optimizer (optiland, experimental)
+7. Exports the best candidates as `.zmx` (Zemax), JSON, or CSV
 
 ## Installation
 
@@ -33,11 +38,18 @@ python -m autoachromat.gui
 
 ### Step 1: Set Parameters
 
-Configure focal length, aperture, wavelengths (visible or IR presets available), and glass catalogs in the Global panel.
+In the Global panel, configure:
+- **f', D** — focal length and aperture (F/# displayed automatically)
+- **Wavelengths** — select from presets (Visible, NIR, SWIR, MWIR, LWIR) or enter manually in nm
+- **Field angle** — used for off-axis aberration evaluation in Stage A and as an optimization target in Stage B
+- **Air gap** — fixed during Stage A synthesis, becomes a free variable in Stage B (spaced doublets only)
+- **Catalogs** — load one or more AGF glass catalog files
 
 ### Step 2: Run Stage A
 
 The system automatically sets minimum edge/center thicknesses (te min, tc min) based on the aperture diameter according to standard manufacturing tables. You can override these values for specific manufacturing requirements, or click **Auto** to reset to the recommended defaults.
+
+Click **Advanced** to set custom aberration targets (SA, Coma, LCA — default 0 = fully corrected) and screening thresholds (minimum Abbe number difference, maximum PE).
 
 Click **Run Stage A** to search all glass pair combinations. Results appear in a sortable table ranked by aberration performance.
 
