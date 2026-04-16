@@ -62,6 +62,13 @@ class OpticMetrics:
     PC: Optional[float] = None  # Petzval curvature      (PC)
     DC: Optional[float] = None  # distortion             (DC)
 
+    # Per-surface Seidel contributions
+    SA_per_surf: List[float] = field(default_factory=list)
+    CC_per_surf: List[float] = field(default_factory=list)
+    AC_per_surf: List[float] = field(default_factory=list)
+    PC_per_surf: List[float] = field(default_factory=list)
+    DC_per_surf: List[float] = field(default_factory=list)
+
     # Transverse Seidel coefficients
     TSC: Optional[float] = None  # transverse spherical
     TCC: Optional[float] = None  # transverse coma
@@ -72,6 +79,8 @@ class OpticMetrics:
     # Chromatic
     LchC: Optional[float] = None  # longitudinal chromatic aberration
     TchC: Optional[float] = None  # transverse chromatic aberration
+    LchC_per_surf: List[float] = field(default_factory=list)
+    TchC_per_surf: List[float] = field(default_factory=list)
     secondary_spectrum: Optional[float] = None  # BFD(λ₀) − avg(BFD(λ₁),BFD(λ₂)) [mm]
 
     # Thin-lens synthesis values (for comparison / ranking)
@@ -317,11 +326,23 @@ def evaluate(
         #   _dn = n(0.4861) - n(0.6563)
         # inside _precalculations(), but for non-visible designs this is wrong.
         with _patched_dispersion(ab, op, inputs):
-            m.SA = _scalar(ab.SC())
-            m.CC = _scalar(ab.CC())
-            m.AC = _scalar(ab.AC())
-            m.PC = _scalar(ab.PC())
-            m.DC = _scalar(ab.DC())
+            _sc = ab.SC()
+            _cc = ab.CC()
+            _ac = ab.AC()
+            _pc = ab.PC()
+            _dc = ab.DC()
+
+            m.SA = _scalar(_sc)
+            m.CC = _scalar(_cc)
+            m.AC = _scalar(_ac)
+            m.PC = _scalar(_pc)
+            m.DC = _scalar(_dc)
+
+            m.SA_per_surf = _to_list(_sc)
+            m.CC_per_surf = _to_list(_cc)
+            m.AC_per_surf = _to_list(_ac)
+            m.PC_per_surf = _to_list(_pc)
+            m.DC_per_surf = _to_list(_dc)
 
             # Transverse Seidel
             m.TSC = _scalar(ab.TSC())
@@ -330,8 +351,12 @@ def evaluate(
             m.TPC = _scalar(ab.TPC())
 
             # ---- Chromatic ----
-            m.LchC = _scalar(ab.LchC())
-            m.TchC = _scalar(ab.TchC())
+            _lchc = ab.LchC()
+            _tchc = ab.TchC()
+            m.LchC = _scalar(_lchc)
+            m.TchC = _scalar(_tchc)
+            m.LchC_per_surf = _to_list(_lchc)
+            m.TchC_per_surf = _to_list(_tchc)
 
         # ---- Secondary spectrum (ABCD, independent of optiland) ----
         m.secondary_spectrum = _secondary_spectrum(rx, candidate, inputs)
@@ -458,3 +483,11 @@ def _scalar(arr) -> Optional[float]:
         return float(arr)
     except (TypeError, ValueError):
         return None
+
+
+def _to_list(arr) -> List[float]:
+    """Convert a numpy array to a list of Python floats."""
+    try:
+        return [float(v) for v in np.asarray(arr).ravel()]
+    except (TypeError, ValueError):
+        return []

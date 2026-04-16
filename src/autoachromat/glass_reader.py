@@ -48,6 +48,9 @@ class Glass:
     td_ltk: float | None = None  # thermal knee wavelength [µm]
     td_T_ref: float | None = None  # reference temperature [°C]
 
+    # IT lines: internal transmittance data [(wavelength_um, transmittance, thickness_mm)]
+    transmission: list[tuple[float, float, float]] = field(default_factory=list)
+
     # OD line field
     relative_cost: float | None = None
 
@@ -228,7 +231,16 @@ def read_agf(path: str) -> tuple[str, list[Glass]]:
             if len(parts) > 7:
                 current_glass.td_T_ref = _parse_float(parts[7])
 
-        # Ignore other tags: GC, IT, BD, MD, etc.
+        elif tag == "IT" and current_glass is not None:
+            # IT line: wavelength(µm) transmittance thickness(mm)
+            if len(parts) >= 4:
+                lam = _parse_float(parts[1])
+                trans = _parse_float(parts[2])
+                thick = _parse_float(parts[3])
+                if lam is not None and trans is not None and thick is not None:
+                    current_glass.transmission.append((lam, trans, thick))
+
+        # Ignore other tags: GC, BD, MD, etc.
 
     # Don't forget the last glass
     if current_glass is not None:

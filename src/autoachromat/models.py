@@ -145,6 +145,10 @@ class Candidate:
     formula_id2: Optional[int] = None
     cd2: list[float] = field(default_factory=list)
 
+    # Internal transmittance data [(wavelength_um, transmittance, thickness_mm)]
+    trans1: list[tuple[float, float, float]] = field(default_factory=list)
+    trans2: list[tuple[float, float, float]] = field(default_factory=list)
+
     notes: dict = field(default_factory=dict)
 
     # Thermal analysis result (None when glass lacks TD/ED data)
