@@ -22,19 +22,25 @@ Automated achromatic doublet lens designer. Generates cemented and air-spaced do
 
 ## Installation
 
+This project uses [uv](https://docs.astral.sh/uv/) for environment and dependency management.
+
 ```bash
 git clone <repo-url>
 cd AutoAchromat
-pip install -e .
+uv sync
 ```
 
-Requires Python >= 3.10. Dependencies (`numpy`, `optiland`, `scipy`, `matplotlib`) are installed automatically.
+`uv sync` creates a `.venv/`, installs all dependencies from `uv.lock`, and installs the project in editable mode. Activate the environment with `.venv\Scripts\activate` (Windows) or `source .venv/bin/activate` (macOS/Linux), or run commands directly via `uv run`, e.g. `uv run autoachromat-gui`.
+
+Requires Python >= 3.10 (uv will download a matching interpreter automatically if none is found). Dependencies (`numpy`, `optiland`, `scipy`, `matplotlib`) are installed automatically.
 
 ## Quick Start
 
 ```bash
-python -m autoachromat.gui
+uv run autoachromat-gui
 ```
+
+(Or, after activating `.venv`: `autoachromat-gui` / `python -m autoachromat.gui`.)
 
 ### Step 1: Set Parameters
 
@@ -84,5 +90,5 @@ The repo includes Schott, OHARA and CDGM catalogs in `data/catalogs/`. To add ot
 ## Running Tests
 
 ```bash
-pytest
+uv run pytest
 ```
