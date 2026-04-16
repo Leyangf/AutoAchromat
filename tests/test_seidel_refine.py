@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import math
 import pytest
 
 from autoachromat.models import Inputs, Candidate, ThickPrescription, ElementRx
 from autoachromat.seidel_refine import (
     trace_marginal_cemented,
     trace_marginal_spaced,
-    thick_seidel_P_cemented,
-    thick_seidel_P_spaced,
     _P_from_Q_cemented,
     refine_seidel,
 )
-from autoachromat.cemented import _solve_Q_roots, radii_from_Q, _P2_and_PE
+from autoachromat.cemented import _solve_Q_roots, radii_from_Q
 from autoachromat.thickening import thicken_cemented
 
 
@@ -139,6 +136,7 @@ class TestThickSeidelP:
         assert rx is not None
 
         e1, e2 = rx.elements[0], rx.elements[1]
+        assert cand.Q is not None
         P_thick = _P_from_Q_cemented(
             cand.Q, cand.phi1, cand.n1, cand.n2,
             t1=e1.t_center, t2=e2.t_center,
