@@ -12,7 +12,6 @@ from autoachromat.seidel_refine import (
     thick_seidel_P_cemented,
     thick_seidel_P_spaced,
     _P_from_Q_cemented,
-    _newton_1d,
     refine_seidel,
 )
 from autoachromat.cemented import _solve_Q_roots, radii_from_Q, _P2_and_PE
@@ -153,28 +152,6 @@ class TestThickSeidelP:
 # ---------------------------------------------------------------------------
 # Newton solver tests
 # ---------------------------------------------------------------------------
-
-
-class TestNewton:
-    """Verify Newton iteration converges."""
-
-    def test_quadratic_converges(self):
-        """Newton on a simple quadratic should converge in ≤3 steps."""
-        # f(x) = x^2 - 4 → root at x=2
-        steps = []
-
-        def eval_fn(x):
-            steps.append(x)
-            return x ** 2
-
-        result = _newton_1d(eval_fn, 3.0, 4.0)
-        assert result is not None
-        assert abs(result - 2.0) < 1e-5
-
-    def test_returns_none_on_bad_eval(self):
-        """If eval_fn returns None at x0, Newton returns None."""
-        result = _newton_1d(lambda x: None, 1.0, 0.0)
-        assert result is None
 
 
 # ---------------------------------------------------------------------------

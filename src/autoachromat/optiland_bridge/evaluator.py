@@ -194,6 +194,48 @@ def _secondary_spectrum(
     return bfd0 - (bfd1 + bfd2) / 2.0
 
 
+def chromatic_focal_shift(
+    rx,
+    candidate: Candidate,
+    inputs: Inputs,
+    n_points: int = 20,
+) -> tuple[list[float], list[float]] | None:
+    """Compute BFD(λ) curve across the design waveband.
+
+    Returns (wavelengths_um, delta_bfd_mm) where delta_bfd is relative
+    to BFD at the design wavelength λ₀.  Returns None if dispersion
+    data is unavailable.
+    """
+    if rx is None:
+        return None
+
+    bfd0 = _bfd_at_wavelength(rx, candidate, inputs.lam0)
+    if bfd0 is None:
+        return None
+
+    lam_min = min(inputs.lam1, inputs.lam2)
+    lam_max = max(inputs.lam1, inputs.lam2)
+    margin = (lam_max - lam_min) * 0.05
+    lam_lo = lam_min - margin
+    lam_hi = lam_max + margin
+
+    wavelengths: list[float] = []
+    delta_bfd: list[float] = []
+
+    for i in range(n_points):
+        lam = lam_lo + (lam_hi - lam_lo) * i / (n_points - 1)
+        bfd = _bfd_at_wavelength(rx, candidate, lam)
+        if bfd is None:
+            continue
+        wavelengths.append(lam)
+        delta_bfd.append(bfd - bfd0)
+
+    if len(wavelengths) < 2:
+        return None
+
+    return wavelengths, delta_bfd
+
+
 # ---------------------------------------------------------------------------
 # Single-candidate evaluation
 # ---------------------------------------------------------------------------
