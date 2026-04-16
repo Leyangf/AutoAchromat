@@ -2,13 +2,18 @@
 
 Automated achromatic doublet lens designer. Generates cemented and air-spaced doublet initial structures from glass catalogs, evaluates optical performance via ray tracing, and exports designs for further optimization in Zemax or other optical design software.
 
+| Cemented Doublet | Air-Spaced Doublet |
+|---|---|
+| ![Cemented](example/cemented_example.png) | ![Spaced](example/spaced_example.png) |
+
 ## What It Does
 
 1. Reads industry-standard AGF glass catalogs (SCHOTT, OHARA, CDGM, etc.)
 2. Automatically searches all valid glass pair combinations
 3. Produces thick-lens prescriptions with manufacturing-feasible thicknesses
 4. Evaluates each design: spot size, Seidel aberrations, chromatic errors, secondary spectrum, thermal stability
-5. Exports the best candidates as `.zmx` (Zemax), JSON, or CSV
+5. Optionally refines designs via built-in numerical optimizer (optiland, experimental)
+6. Exports the best candidates as `.zmx` (Zemax), JSON, or CSV
 
 ## Installation
 
@@ -59,16 +64,6 @@ Select one or more rows in the results table and click **Optimize**. This runs a
 
 - **Export .zmx** — export selected design to Zemax for further optimization
 - **Export JSON / CSV** — export full results table
-
-## Examples
-
-### Cemented Doublet
-
-![Cemented doublet example](example/cemented_example.png)
-
-### Air-Spaced Doublet
-
-![Air-spaced doublet example](example/spaced_example.png)
 
 ## Glass Catalogs
 
