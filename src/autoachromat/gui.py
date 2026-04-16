@@ -54,6 +54,33 @@ def _fmt(v: Optional[float], fmt: str = ".4f") -> str:
     return f"{v:{fmt}}"
 
 
+def _interp_transmittance(
+    trans_data: list[tuple[float, float, float]], lam_um: float,
+) -> float | None:
+    """Linearly interpolate internal transmittance at a given wavelength.
+
+    trans_data is [(wavelength_um, transmittance, thickness_mm), ...].
+    Returns transmittance (0-1) or None if out of range.
+    """
+    if not trans_data:
+        return None
+    # Sort by wavelength
+    pts = sorted(trans_data, key=lambda t: t[0])
+    wls = [p[0] for p in pts]
+    trs = [p[1] for p in pts]
+
+    if lam_um < wls[0] or lam_um > wls[-1]:
+        return None
+    if len(wls) == 1:
+        return trs[0] if abs(lam_um - wls[0]) < 1e-6 else None
+
+    for i in range(len(wls) - 1):
+        if wls[i] <= lam_um <= wls[i + 1]:
+            t = (lam_um - wls[i]) / (wls[i + 1] - wls[i])
+            return trs[i] + t * (trs[i + 1] - trs[i])
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Result row  (one per candidate)
 # ---------------------------------------------------------------------------
@@ -504,7 +531,7 @@ class AutoAchromatGUI(tk.Tk):
 
     _COLUMNS = [
         ("#", "idx", 40, tk.CENTER),
-        ("Src", "src", 35, tk.CENTER),
+        ("From", "src", 35, tk.CENTER),
         ("Glass 1", "glass1", 130, tk.W),
         ("Glass 2", "glass2", 130, tk.W),
         ("Type", "type", 55, tk.CENTER),
@@ -561,35 +588,49 @@ class AutoAchromatGUI(tk.Tk):
         frame = ttk.LabelFrame(self, text=" ④ Selected Design Details ")
         parent.add(frame, weight=1)
 
-        # Left: Prescription & First-Order
+        # Use grid with uniform columns to force proportional widths
+        frame.columnconfigure(0, weight=1, uniform="detail")
+        frame.columnconfigure(1, weight=1, uniform="detail")
+        frame.columnconfigure(2, weight=1, uniform="detail")
+        frame.columnconfigure(3, weight=1, uniform="detail")
+        frame.rowconfigure(0, weight=1)
+
+        # Prescription & First-Order
         left = ttk.LabelFrame(frame, text="Prescription & First-Order")
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=2)
+        left.grid(row=0, column=0, sticky="nsew", padx=4, pady=2)
         self._detail_rx = tk.Text(
-            left, height=10, width=45, font=("Consolas", 9), state=tk.DISABLED
+            left, height=10, width=1, font=("Consolas", 9), state=tk.DISABLED
         )
         self._detail_rx.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
-        # Middle: Aberrations
+        # Aberrations
         mid = ttk.LabelFrame(frame, text="Aberrations")
-        mid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=2)
+        mid.grid(row=0, column=1, sticky="nsew", padx=4, pady=2)
         self._detail_ab = tk.Text(
-            mid, height=10, width=35, font=("Consolas", 9), state=tk.DISABLED
+            mid, height=10, width=1, font=("Consolas", 9), state=tk.DISABLED
         )
         self._detail_ab.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
-        # Right: Glass & Thermal
+        # Glass & Thermal
         right = ttk.LabelFrame(frame, text="Glass & Thermal")
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=2)
+        right.grid(row=0, column=2, sticky="nsew", padx=4, pady=2)
         self._detail_cmp = tk.Text(
-            right, height=10, width=40, font=("Consolas", 9), state=tk.DISABLED
+            right, height=10, width=1, font=("Consolas", 9), state=tk.DISABLED
         )
         self._detail_cmp.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        # n(λ) dispersion curve
+        self._nlam_frame = ttk.LabelFrame(frame, text="Dispersion n(λ)")
+        self._nlam_frame.grid(row=0, column=3, sticky="nsew", padx=4, pady=2)
+        self._nlam_fig = None
+        self._nlam_canvas: Optional[FigureCanvasTkAgg] = None
 
     def _build_drawing_panel(self, parent: ttk.PanedWindow) -> None:
         outer = ttk.Frame(self)
         parent.add(outer, weight=1)
         outer.columnconfigure(0, weight=3)
         outer.columnconfigure(1, weight=2)
+        outer.columnconfigure(2, weight=2)
         outer.rowconfigure(0, weight=1)
 
         self._draw_frame = ttk.LabelFrame(outer, text=" ⑤ 2D Optical Layout ")
@@ -601,6 +642,11 @@ class AutoAchromatGUI(tk.Tk):
         self._cfs_frame.grid(row=0, column=1, sticky="nsew", padx=2, pady=2)
         self._cfs_fig = None
         self._cfs_canvas: Optional[FigureCanvasTkAgg] = None
+
+        self._seidel_frame = ttk.LabelFrame(outer, text=" Seidel per Surface ")
+        self._seidel_frame.grid(row=0, column=2, sticky="nsew", padx=2, pady=2)
+        self._seidel_fig = None
+        self._seidel_canvas: Optional[FigureCanvasTkAgg] = None
 
     def _equalize_pane_heights(self) -> None:
         """Set equal initial heights for the three main panes."""
@@ -1102,6 +1148,8 @@ class AutoAchromatGUI(tk.Tk):
             widget.configure(state=tk.DISABLED)
         self._clear_drawing()
         self._clear_cfs()
+        self._clear_seidel()
+        self._clear_nlam()
 
     def _fill_detail(self, row: ResultRow) -> None:
         self._fill_prescription(row)
@@ -1109,6 +1157,8 @@ class AutoAchromatGUI(tk.Tk):
         self._fill_comparison(row)
         self._fill_drawing(row)
         self._fill_cfs(row)
+        self._fill_seidel(row)
+        self._fill_nlam(row)
 
     def _fill_prescription(self, row: ResultRow) -> None:
         """Fill the Prescription text widget with surface table."""
@@ -1168,6 +1218,22 @@ class AutoAchromatGUI(tk.Tk):
             dev_pct = (rx.efl_deviation or 0.0) * 100.0
             lines.append(f"  EFL (ABCD):     {rx.actual_efl:.3f} mm")
             lines.append(f"  EFL deviation:  {dev_pct:+.3f} %")
+
+        # Thin-lens synthesis parameters
+        cand = row.cand
+        lines.append("")
+        lines.append("  Synthesis Parameters")
+        lines.append("  ───────────────────────")
+        lines.append(f"  φ₁ = {cand.phi1:.6f}")
+        lines.append(f"  φ₂ = {cand.phi2:.6f}")
+        if cand.Q is not None:
+            lines.append(f"  Q  = {cand.Q:.6f}")
+        if cand.Q1 is not None:
+            lines.append(f"  Q₁ = {cand.Q1:.6f}")
+            lines.append(f"  Q₂ = {cand.Q2:.6f}")
+        if cand.W is not None:
+            lines.append(f"  W  = {cand.W:.6f}")
+        lines.append(f"  PE = {_fmt(cand.PE, '.4f')}")
 
         w.insert(tk.END, "\n".join(lines))
         w.configure(state=tk.DISABLED)
@@ -1251,20 +1317,30 @@ class AutoAchromatGUI(tk.Tk):
         except Exception:
             pass
 
-        # Seidel synthesis parameters
+        # Internal transmittance at design wavelengths
         lines.append("")
-        lines.append("  Seidel Parameters")
+        lines.append("  Transmittance (internal)")
         lines.append("  ─────────────────────────")
-        lines.append(f"  φ₁ = {cand.phi1:.6f}")
-        lines.append(f"  φ₂ = {cand.phi2:.6f}")
-        if cand.Q is not None:
-            lines.append(f"  Q  = {cand.Q:.6f}")
-        if cand.Q1 is not None:
-            lines.append(f"  Q₁ = {cand.Q1:.6f}")
-            lines.append(f"  Q₂ = {cand.Q2:.6f}")
-        if cand.W is not None:
-            lines.append(f"  W  = {cand.W:.6f}")
-        lines.append(f"  PE = {_fmt(cand.PE, '.4f')}")
+        try:
+            inputs = self._make_inputs()
+            for name, trans_data in [
+                (cand.glass1, cand.trans1),
+                (cand.glass2, cand.trans2),
+            ]:
+                if not trans_data:
+                    lines.append(f"  {name}: (no IT data)")
+                    continue
+                t_str_parts = []
+                for lam in [inputs.lam1, inputs.lam0, inputs.lam2]:
+                    t_val = _interp_transmittance(trans_data, lam)
+                    lam_nm = lam * 1000
+                    if t_val is not None:
+                        t_str_parts.append(f"{lam_nm:.0f}nm:{t_val:.3f}")
+                    else:
+                        t_str_parts.append(f"{lam_nm:.0f}nm:—")
+                lines.append(f"  {name}: {' '.join(t_str_parts)}")
+        except Exception:
+            lines.append("  (error)")
 
         # Thermal analysis
         th = cand.thermal
@@ -1438,6 +1514,226 @@ class AutoAchromatGUI(tk.Tk):
                 text=f"Plot error: {type(exc).__name__}: {exc}",
                 foreground="red",
                 wraplength=200,
+            ).pack(expand=True)
+
+    # ===================================================================
+    # n(λ) dispersion curve
+    # ===================================================================
+
+    def _clear_nlam(self) -> None:
+        if self._nlam_fig is not None:
+            plt.close(self._nlam_fig)
+            self._nlam_fig = None
+        self._nlam_canvas = None
+        for w in self._nlam_frame.winfo_children():
+            w.destroy()
+
+    def _fill_nlam(self, row: ResultRow) -> None:
+        """Plot n(λ) for both glasses of the selected design."""
+        from .optics import refractive_index
+        from .glass_reader import Glass
+
+        self._clear_nlam()
+
+        cand = row.cand
+        if not cand.cd1 or not cand.cd2:
+            ttk.Label(
+                self._nlam_frame, text="(no dispersion data)", foreground="#999999",
+            ).pack(expand=True)
+            return
+        if cand.formula_id1 is None or cand.formula_id2 is None:
+            ttk.Label(
+                self._nlam_frame, text="(no formula)", foreground="#999999",
+            ).pack(expand=True)
+            return
+
+        try:
+            inputs = self._make_inputs()
+            lam_min = min(inputs.lam1, inputs.lam2)
+            lam_max = max(inputs.lam1, inputs.lam2)
+            margin = (lam_max - lam_min) * 0.1
+            lam_lo = lam_min - margin
+            lam_hi = lam_max + margin
+
+            g1 = Glass(name=cand.glass1, catalog=cand.catalog1,
+                       formula_id=cand.formula_id1, cd=cand.cd1)
+            g2 = Glass(name=cand.glass2, catalog=cand.catalog2,
+                       formula_id=cand.formula_id2, cd=cand.cd2)
+
+            n_pts = 30
+            wls = [lam_lo + (lam_hi - lam_lo) * i / (n_pts - 1) for i in range(n_pts)]
+            wls_nm = [w * 1000 for w in wls]
+
+            # Compute n(λ) - n(λ₀) for both glasses
+            try:
+                n1_ref = refractive_index(g1, inputs.lam0)
+                n2_ref = refractive_index(g2, inputs.lam0)
+            except Exception:
+                n1_ref = n2_ref = 0.0
+
+            dn1_vals, dn2_vals = [], []
+            for w in wls:
+                try:
+                    dn1_vals.append(refractive_index(g1, w) - n1_ref)
+                except Exception:
+                    dn1_vals.append(float("nan"))
+                try:
+                    dn2_vals.append(refractive_index(g2, w) - n2_ref)
+                except Exception:
+                    dn2_vals.append(float("nan"))
+
+            fig, ax = plt.subplots(figsize=(4, 3))
+            ax.plot(wls_nm, dn1_vals, "b-", linewidth=1.5,
+                    label=f"{cand.glass1} (n₀={n1_ref:.4f})")
+            ax.plot(wls_nm, dn2_vals, "r-", linewidth=1.5,
+                    label=f"{cand.glass2} (n₀={n2_ref:.4f})")
+            ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
+
+            # Mark design wavelengths
+            for lam_var, marker in [
+                (inputs.lam1, "v"), (inputs.lam0, "o"), (inputs.lam2, "^"),
+            ]:
+                lnm = lam_var * 1000
+                try:
+                    ax.plot(lnm, refractive_index(g1, lam_var) - n1_ref, marker,
+                            color="blue", markersize=5)
+                    ax.plot(lnm, refractive_index(g2, lam_var) - n2_ref, marker,
+                            color="red", markersize=5)
+                except Exception:
+                    pass
+
+            ax.set_xlabel("Wavelength [nm]")
+            ax.set_ylabel("n(λ) − n(λ₀)")
+            ax.legend(fontsize=6)
+            ax.tick_params(labelsize=7)
+            fig.tight_layout()
+
+            self._nlam_fig = fig
+            canvas = FigureCanvasTkAgg(fig, master=self._nlam_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._nlam_canvas = canvas
+
+        except Exception as exc:
+            ttk.Label(
+                self._nlam_frame,
+                text=f"Plot error: {type(exc).__name__}: {exc}",
+                foreground="red", wraplength=200,
+            ).pack(expand=True)
+
+    # ===================================================================
+    # Seidel per-surface bar chart
+    # ===================================================================
+
+    def _clear_seidel(self) -> None:
+        if self._seidel_fig is not None:
+            plt.close(self._seidel_fig)
+            self._seidel_fig = None
+        self._seidel_canvas = None
+        for w in self._seidel_frame.winfo_children():
+            w.destroy()
+
+    def _fill_seidel(self, row: ResultRow) -> None:
+        """Plot per-surface Seidel aberration bar chart."""
+        self._clear_seidel()
+
+        m = row.metrics
+        if not m.success or not m.SA_per_surf:
+            ttk.Label(
+                self._seidel_frame, text="(no data)", foreground="#999999",
+            ).pack(expand=True)
+            return
+
+        try:
+            import numpy as _np
+
+            n_surf = len(m.SA_per_surf)
+            colors = plt.cm.tab10.colors[:n_surf]  # type: ignore[attr-defined]
+            surf_labels = [f"S{s + 1}" for s in range(n_surf)]
+
+            fig, (ax_sa, ax_rest) = plt.subplots(
+                2, 1, figsize=(5, 3), height_ratios=[1, 1],
+            )
+
+            # Top: SA + LchC (large values, grouped by aberration)
+            top_labels = ["SA", "LchC"]
+            top_data = [m.SA_per_surf, m.LchC_per_surf]
+            x_top = _np.arange(len(top_labels))
+            width_top = 0.8 / n_surf
+
+            for s in range(n_surf):
+                vals = [top_data[a][s] if s < len(top_data[a]) else 0
+                        for a in range(len(top_labels))]
+                offset = (s - (n_surf - 1) / 2) * width_top
+                ax_sa.bar(
+                    x_top + offset, vals, width_top,
+                    label=surf_labels[s], color=colors[s],
+                )
+
+            ax_sa.set_xticks(x_top)
+            ax_sa.set_xticklabels(top_labels)
+            ax_sa.axhline(0, color="gray", linewidth=0.5)
+
+            # Total sum annotations
+            for a_idx, (label, total) in enumerate([
+                ("SA", m.SA), ("LchC", m.LchC),
+            ]):
+                if total is not None:
+                    ax_sa.annotate(
+                        f"Σ={total:.3f}", xy=(a_idx, total),
+                        fontsize=6, ha="center", va="bottom" if total >= 0 else "top",
+                        color="black",
+                    )
+                    ax_sa.plot(
+                        [a_idx - 0.4, a_idx + 0.4], [total, total],
+                        "k--", linewidth=0.8,
+                    )
+
+            ax_sa.set_ylabel("Coeff.", fontsize=8)
+            ax_sa.legend(fontsize=7, ncol=n_surf)
+            ax_sa.tick_params(labelsize=7)
+            ax_sa.set_title(
+                f"{row.cand.glass1} + {row.cand.glass2}", fontsize=9,
+            )
+
+            # Bottom: CC, AC, PC, DC, TchC (small values, shared scale)
+            rest_labels = ["CC", "AC", "PC", "DC", "TchC"]
+            rest_data = [
+                m.CC_per_surf, m.AC_per_surf,
+                m.PC_per_surf, m.DC_per_surf,
+                m.TchC_per_surf,
+            ]
+            x = _np.arange(len(rest_labels))
+            width = 0.8 / n_surf
+
+            for s in range(n_surf):
+                vals = [rest_data[a][s] if s < len(rest_data[a]) else 0
+                        for a in range(len(rest_labels))]
+                offset = (s - (n_surf - 1) / 2) * width
+                ax_rest.bar(
+                    x + offset, vals, width,
+                    label=surf_labels[s], color=colors[s],
+                )
+
+            ax_rest.set_xticks(x)
+            ax_rest.set_xticklabels(rest_labels)
+            ax_rest.axhline(0, color="gray", linewidth=0.5)
+            ax_rest.set_ylabel("Coeff.", fontsize=8)
+            ax_rest.tick_params(labelsize=7)
+            fig.align_ylabels([ax_sa, ax_rest])
+            fig.tight_layout()
+
+            self._seidel_fig = fig
+            canvas = FigureCanvasTkAgg(fig, master=self._seidel_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._seidel_canvas = canvas
+
+        except Exception as exc:
+            ttk.Label(
+                self._seidel_frame,
+                text=f"Plot error: {type(exc).__name__}: {exc}",
+                foreground="red", wraplength=200,
             ).pack(expand=True)
 
     # ===================================================================

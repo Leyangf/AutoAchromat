@@ -300,6 +300,8 @@ def run_spaced(inputs: Inputs, glasses: list[Glass]) -> list[Candidate]:
                             cd1=list(g1.cd),
                             formula_id2=g2.formula_id,
                             cd2=list(g2.cd),
+                            trans1=list(g1.transmission),
+                            trans2=list(g2.transmission),
                             notes={"C_const_used": c["C"]},
                             thermal=thermal,
                         )
