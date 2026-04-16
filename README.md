@@ -32,7 +32,11 @@ Configure focal length, aperture, wavelengths (visible or IR presets available),
 
 ### Step 2: Run Stage A
 
+The system automatically sets minimum edge/center thicknesses (te min, tc min) based on the aperture diameter according to standard manufacturing tables. You can override these values for specific manufacturing requirements, or click **Auto** to reset to the recommended defaults.
+
 Click **Run Stage A** to search all glass pair combinations. Results appear in a sortable table ranked by aberration performance.
+
+For air-spaced doublets, check **Hide extreme shapes** to filter out meniscus designs with the convex surface facing the air gap, which are difficult to manufacture and mount.
 
 ### Step 3: Analyze Results
 
@@ -45,7 +49,13 @@ Select any row to see:
 - Per-surface Seidel bar chart
 - Dispersion comparison of the two glasses
 
-### Step 4: Export
+### Step 4: Optimize (Stage B, experimental)
+
+Select one or more rows in the results table and click **Optimize**. This runs a numerical optimizer (optiland LeastSquares) that refines radii, thicknesses, and air gap to minimize spot size while preserving focal length.
+
+> **Note:** Stage B is slow (~10-30s per candidate) and still experimental. Merit function weights (W_efl, W_rms, W_field) and iteration count can be adjusted in the Stage B panel.
+
+### Step 5: Export
 
 - **Export .zmx** — export selected design to Zemax for further optimization
 - **Export JSON / CSV** — export full results table
