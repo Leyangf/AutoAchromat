@@ -620,7 +620,7 @@ class AutoAchromatGUI(tk.Tk):
         self._detail_cmp.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
         # n(λ) dispersion curve
-        self._nlam_frame = ttk.LabelFrame(frame, text="Dispersion n(λ)")
+        self._nlam_frame = ttk.LabelFrame(frame, text="Dispersion")
         self._nlam_frame.grid(row=0, column=3, sticky="nsew", padx=4, pady=2)
         self._nlam_fig = None
         self._nlam_canvas: Optional[FigureCanvasTkAgg] = None
@@ -1270,6 +1270,17 @@ class AutoAchromatGUI(tk.Tk):
         lines.append("  ───────────────────────")
         lines.append(f"  RMS spot: {_fmt(m.rms_spot_radius, '.2f')} µm")
         lines.append(f"  GEO spot: {_fmt(m.geo_spot_radius, '.2f')} µm")
+        if m.fno is not None:
+            try:
+                lam0_um = self._make_inputs().lam0
+            except Exception:
+                lam0_um = 0.58756
+            airy_um = 1.22 * lam0_um * m.fno
+            lines.append(f"  Airy rad: {airy_um:.2f} µm")
+            if m.rms_spot_radius is not None and airy_um > 0:
+                ratio = m.rms_spot_radius / airy_um
+                status = "diffr. limited" if ratio < 1.0 else f"{ratio:.1f}× Airy"
+                lines.append(f"  RMS/Airy: {status}")
 
         w.insert(tk.END, "\n".join(lines))
         w.configure(state=tk.DISABLED)
@@ -1290,32 +1301,40 @@ class AutoAchromatGUI(tk.Tk):
             lam0_nm = 587.56
         lines.append(f"  Glass Properties (at λ₀={lam0_nm:.1f}nm)")
         lines.append("  ─────────────────────────")
-        lines.append(f"  Glass 1: {cand.catalog1}:{cand.glass1}")
-        lines.append(f"    n₀ = {cand.n1:.6f}   ν = {cand.nu1:.2f}")
-        lines.append(f"  Glass 2: {cand.catalog2}:{cand.glass2}")
-        lines.append(f"    n₀ = {cand.n2:.6f}   ν = {cand.nu2:.2f}")
-        lines.append(f"  Δν = {abs(cand.nu1 - cand.nu2):.2f}")
 
-        # Partial dispersion (if dispersion data available)
+        # Compute partial dispersion for each glass
+        P_vals = [None, None]
         try:
             from .optics import refractive_index
             from .glass_reader import Glass
             inputs = self._make_inputs()
-            for name, cat, fid, cd, nu in [
-                (cand.glass1, cand.catalog1, cand.formula_id1, cand.cd1, cand.nu1),
-                (cand.glass2, cand.catalog2, cand.formula_id2, cand.cd2, cand.nu2),
-            ]:
+            for i, (fid, cd) in enumerate([
+                (cand.formula_id1, cand.cd1),
+                (cand.formula_id2, cand.cd2),
+            ]):
                 if fid is not None and cd:
+                    cat = [cand.catalog1, cand.catalog2][i]
+                    name = [cand.glass1, cand.glass2][i]
                     g = Glass(name=name, catalog=cat, formula_id=fid, cd=cd)
                     n0 = refractive_index(g, inputs.lam0)
                     n1 = refractive_index(g, inputs.lam1)
                     n2 = refractive_index(g, inputs.lam2)
                     dn = n1 - n2
                     if abs(dn) > 1e-10:
-                        P = (n0 - n1) / dn
-                        lines.append(f"    P = {P:.4f}")
+                        P_vals[i] = (n0 - n1) / dn
         except Exception:
             pass
+
+        p1_str = f"P={P_vals[0]:.4f}" if P_vals[0] is not None else ""
+        p2_str = f"P={P_vals[1]:.4f}" if P_vals[1] is not None else ""
+
+        lines.append(f"  {cand.glass1}:")
+        lines.append(f"    n₀={cand.n1:.6f}  ν={cand.nu1:.2f}  {p1_str}")
+        lines.append(f"  {cand.glass2}:")
+        lines.append(f"    n₀={cand.n2:.6f}  ν={cand.nu2:.2f}  {p2_str}")
+        lines.append(f"  Δν={abs(cand.nu1 - cand.nu2):.2f}")
+        if P_vals[0] is not None and P_vals[1] is not None:
+            lines.append(f"  ΔP={abs(P_vals[0] - P_vals[1]):.4f}")
 
         # Internal transmittance at design wavelengths
         lines.append("")
@@ -1330,15 +1349,12 @@ class AutoAchromatGUI(tk.Tk):
                 if not trans_data:
                     lines.append(f"  {name}: (no IT data)")
                     continue
-                t_str_parts = []
+                lines.append(f"  {name}:")
                 for lam in [inputs.lam1, inputs.lam0, inputs.lam2]:
                     t_val = _interp_transmittance(trans_data, lam)
                     lam_nm = lam * 1000
-                    if t_val is not None:
-                        t_str_parts.append(f"{lam_nm:.0f}nm:{t_val:.3f}")
-                    else:
-                        t_str_parts.append(f"{lam_nm:.0f}nm:—")
-                lines.append(f"  {name}: {' '.join(t_str_parts)}")
+                    t_str = f"{t_val:.4f}" if t_val is not None else "—"
+                    lines.append(f"    {lam_nm:>7.1f} nm : {t_str}")
         except Exception:
             lines.append("  (error)")
 
@@ -1583,29 +1599,28 @@ class AutoAchromatGUI(tk.Tk):
                     dn2_vals.append(float("nan"))
 
             fig, ax = plt.subplots(figsize=(4, 3))
-            ax.plot(wls_nm, dn1_vals, "b-", linewidth=1.5,
-                    label=f"{cand.glass1} (n₀={n1_ref:.4f})")
-            ax.plot(wls_nm, dn2_vals, "r-", linewidth=1.5,
-                    label=f"{cand.glass2} (n₀={n2_ref:.4f})")
+            ax.plot(wls_nm, dn1_vals, "b-", linewidth=1.2,
+                    label=cand.glass1)
+            ax.plot(wls_nm, dn2_vals, "r-", linewidth=1.2,
+                    label=cand.glass2)
             ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
 
-            # Mark design wavelengths
             for lam_var, marker in [
                 (inputs.lam1, "v"), (inputs.lam0, "o"), (inputs.lam2, "^"),
             ]:
                 lnm = lam_var * 1000
                 try:
-                    ax.plot(lnm, refractive_index(g1, lam_var) - n1_ref, marker,
-                            color="blue", markersize=5)
-                    ax.plot(lnm, refractive_index(g2, lam_var) - n2_ref, marker,
-                            color="red", markersize=5)
+                    ax.plot(lnm, refractive_index(g1, lam_var) - n1_ref,
+                            marker, color="blue", markersize=4)
+                    ax.plot(lnm, refractive_index(g2, lam_var) - n2_ref,
+                            marker, color="red", markersize=4)
                 except Exception:
                     pass
 
-            ax.set_xlabel("Wavelength [nm]")
-            ax.set_ylabel("n(λ) − n(λ₀)")
+            ax.set_xlabel("Wavelength [nm]", fontsize=7)
+            ax.set_ylabel("n(λ) − n(λ₀)", fontsize=7)
             ax.legend(fontsize=6)
-            ax.tick_params(labelsize=7)
+            ax.tick_params(labelsize=6)
             fig.tight_layout()
 
             self._nlam_fig = fig
