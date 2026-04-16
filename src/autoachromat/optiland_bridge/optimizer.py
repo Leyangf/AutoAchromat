@@ -305,20 +305,24 @@ def _run_optimization(
     # Index of the on-axis RMS operand (added next — track before we add it)
     _on_axis_rms_idx = len(problem.operands)
 
-    # EFL constraint — highest priority, preserves the target focal length.
+    # EFL constraint
+    w_efl = getattr(inputs, "w_efl", 10.0)
+    w_rms = getattr(inputs, "w_rms", 4.0)
+    w_field = getattr(inputs, "w_field", 1.0)
+
     problem.add_operand(
         "f2",
         target=inputs.fprime,
-        weight=10,
+        weight=w_efl,
         input_data={"optic": op},
     )
 
-    # RMS spot radius — on-axis, polychromatic.  Primary aberration objective.
+    # RMS spot radius — on-axis, polychromatic.
     _on_axis_rms_idx = len(problem.operands)
     problem.add_operand(
         "rms_spot_size",
         target=0.0,
-        weight=4,
+        weight=w_rms,
         input_data={
             "optic": op,
             "surface_number": image_surf,
@@ -330,12 +334,10 @@ def _run_optimization(
     )
 
     # RMS spot radius — off-axis (full field), polychromatic.
-    # Lower weight than on-axis so the optimiser does not sacrifice on-axis
-    # performance for off-axis gains.
     problem.add_operand(
         "rms_spot_size",
         target=0.0,
-        weight=1,
+        weight=w_field,
         input_data={
             "optic": op,
             "surface_number": image_surf,
@@ -356,7 +358,8 @@ def _run_optimization(
     # Optimise (TRF: Trust-Region Reflective — supports variable bounds)
     # ------------------------------------------------------------------
     optimizer = LeastSquares(problem)
-    result = optimizer.optimize(maxiter=200, tol=1e-6, method_choice="trf")
+    _maxiter = getattr(inputs, "maxiter", 200)
+    result = optimizer.optimize(maxiter=_maxiter, tol=1e-6, method_choice="trf")
 
     # Check on-axis RMS after optimisation
     try:

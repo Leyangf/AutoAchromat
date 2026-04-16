@@ -58,6 +58,12 @@ class Inputs:
     gap_min: float = 0.0
     gap_max: float = 0.0
 
+    # Stage B merit function weights
+    w_efl: float = 10.0
+    w_rms: float = 4.0
+    w_field: float = 1.0
+    maxiter: int = 200
+
     # Numerical
     eps: float = 1e-12
     root_imag_tol: float = 1e-9
