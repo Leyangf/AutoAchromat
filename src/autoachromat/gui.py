@@ -534,10 +534,21 @@ class AutoAchromatGUI(tk.Tk):
         self._detail_cmp.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
     def _build_drawing_panel(self, parent: ttk.PanedWindow) -> None:
-        self._draw_frame = ttk.LabelFrame(self, text=" ⑤ 2D Optical Layout ")
-        parent.add(self._draw_frame, weight=1)
+        outer = ttk.Frame(self)
+        parent.add(outer, weight=1)
+        outer.columnconfigure(0, weight=3)
+        outer.columnconfigure(1, weight=2)
+        outer.rowconfigure(0, weight=1)
+
+        self._draw_frame = ttk.LabelFrame(outer, text=" ⑤ 2D Optical Layout ")
+        self._draw_frame.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
         self._mpl_fig = None
         self._mpl_canvas: Optional[FigureCanvasTkAgg] = None
+
+        self._cfs_frame = ttk.LabelFrame(outer, text=" Chromatic Focal Shift ")
+        self._cfs_frame.grid(row=0, column=1, sticky="nsew", padx=2, pady=2)
+        self._cfs_fig = None
+        self._cfs_canvas: Optional[FigureCanvasTkAgg] = None
 
     def _equalize_pane_heights(self) -> None:
         """Set equal initial heights for the three main panes."""
@@ -998,12 +1009,14 @@ class AutoAchromatGUI(tk.Tk):
             widget.delete("1.0", tk.END)
             widget.configure(state=tk.DISABLED)
         self._clear_drawing()
+        self._clear_cfs()
 
     def _fill_detail(self, row: ResultRow) -> None:
         self._fill_prescription(row)
         self._fill_aberrations(row)
         self._fill_comparison(row)
         self._fill_drawing(row)
+        self._fill_cfs(row)
 
     def _fill_prescription(self, row: ResultRow) -> None:
         """Fill the Prescription text widget with surface table."""
@@ -1222,6 +1235,93 @@ class AutoAchromatGUI(tk.Tk):
                 text=f"Drawing error: {type(exc).__name__}: {exc}",
                 foreground="red",
                 wraplength=300,
+            ).pack(expand=True)
+
+    # ===================================================================
+    # Chromatic focal shift plot
+    # ===================================================================
+
+    def _clear_cfs(self) -> None:
+        """Release chromatic focal shift figure."""
+        if self._cfs_fig is not None:
+            plt.close(self._cfs_fig)
+            self._cfs_fig = None
+        self._cfs_canvas = None
+        for w in self._cfs_frame.winfo_children():
+            w.destroy()
+
+    def _fill_cfs(self, row: ResultRow) -> None:
+        """Plot chromatic focal shift curve for the selected design."""
+        from .optiland_bridge.evaluator import chromatic_focal_shift
+
+        self._clear_cfs()
+
+        if row.rx is None or not row.metrics.success:
+            ttk.Label(
+                self._cfs_frame,
+                text="(no data)",
+                foreground="#999999",
+            ).pack(expand=True)
+            return
+
+        inputs = self._make_inputs()
+        result = chromatic_focal_shift(row.rx, row.cand, inputs)
+        if result is None:
+            ttk.Label(
+                self._cfs_frame,
+                text="(no dispersion data)",
+                foreground="#999999",
+            ).pack(expand=True)
+            return
+
+        wavelengths_um, delta_bfd = result
+        wavelengths_nm = [w * 1000.0 for w in wavelengths_um]
+
+        try:
+            fig, ax = plt.subplots(figsize=(5, 3))
+            ax.plot(wavelengths_nm, delta_bfd, "b-", linewidth=1.5)
+            ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
+
+            # Mark the three design wavelengths
+            for lam_var, marker, label in [
+                (inputs.lam1, "v", r"$\lambda_1$"),
+                (inputs.lam0, "o", r"$\lambda_0$"),
+                (inputs.lam2, "^", r"$\lambda_2$"),
+            ]:
+                bfd_val = None
+                for wl, db in zip(wavelengths_um, delta_bfd):
+                    if abs(wl - lam_var) < 1e-6:
+                        bfd_val = db
+                        break
+                if bfd_val is None:
+                    from .optiland_bridge.evaluator import _bfd_at_wavelength
+                    bfd0 = _bfd_at_wavelength(row.rx, row.cand, inputs.lam0)
+                    bfd_v = _bfd_at_wavelength(row.rx, row.cand, lam_var)
+                    if bfd0 is not None and bfd_v is not None:
+                        bfd_val = bfd_v - bfd0
+                if bfd_val is not None:
+                    ax.plot(lam_var * 1000, bfd_val, marker, color="red", markersize=6)
+
+            ax.set_xlabel("Wavelength [nm]")
+            ax.set_ylabel("Focal shift [mm]")
+            ax.set_title(
+                f"{row.cand.glass1} + {row.cand.glass2}",
+                fontsize=9,
+            )
+            fig.tight_layout()
+
+            self._cfs_fig = fig
+            canvas = FigureCanvasTkAgg(fig, master=self._cfs_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._cfs_canvas = canvas
+
+        except Exception as exc:
+            ttk.Label(
+                self._cfs_frame,
+                text=f"Plot error: {type(exc).__name__}: {exc}",
+                foreground="red",
+                wraplength=200,
             ).pack(expand=True)
 
     # ===================================================================

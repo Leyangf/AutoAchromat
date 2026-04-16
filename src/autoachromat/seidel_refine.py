@@ -20,10 +20,10 @@ from .models import Candidate, Inputs, ThickPrescription
 # Newton solver parameters
 # ---------------------------------------------------------------------------
 
-_REFINE_TOL = 1e-6
-_REFINE_MAX_ITER = 5
-_NEWTON_DQ = 1e-7
-_MAX_STEP_FACTOR = 0.5  # |ΔQ| clamped to this fraction of |Q|
+_REFINE_MAX_ITER = 10   # max iterations (Newton step + thicken per round)
+_REFINE_TOL = 1e-6      # |P - P0| convergence threshold
+_NEWTON_DQ = 1e-7        # finite-difference step for dP/dQ
+_MAX_STEP_FACTOR = 0.5   # |ΔQ| clamped to this fraction of |Q|
 
 
 # ---------------------------------------------------------------------------
@@ -246,47 +246,6 @@ def _P_from_Q1_spaced(
     return P if math.isfinite(P) else None
 
 
-# ---------------------------------------------------------------------------
-# Newton iteration
-# ---------------------------------------------------------------------------
-
-
-def _newton_1d(eval_fn, x0: float, target: float) -> float | None:
-    """Generic 1D Newton solver: find x such that eval_fn(x) = target.
-
-    Returns refined x, or None on failure.  Falls back to current best
-    if the derivative is near-zero or evaluation fails.
-    """
-    x = x0
-
-    for _ in range(_REFINE_MAX_ITER):
-        P = eval_fn(x)
-        if P is None:
-            return None
-
-        residual = P - target
-        if abs(residual) < _REFINE_TOL:
-            return x
-
-        P_plus = eval_fn(x + _NEWTON_DQ)
-        if P_plus is None:
-            return x
-
-        dPdx = (P_plus - P) / _NEWTON_DQ
-        if abs(dPdx) < 1e-15:
-            return x
-
-        step = residual / dPdx
-
-        # Clamp step size to prevent wild jumps
-        max_step = _MAX_STEP_FACTOR * max(abs(x), 1.0)
-        if abs(step) > max_step:
-            step = math.copysign(max_step, step)
-
-        x -= step
-
-    return x
-
 
 # ---------------------------------------------------------------------------
 # Cemented refinement
@@ -298,35 +257,67 @@ def _refine_cemented(
     cand: Candidate,
     inp: Inputs,
 ) -> ThickPrescription:
-    """Refine Q for a cemented doublet, recompute radii, re-thicken."""
-    Q_old = cand.Q
-    if Q_old is None:
-        return rx
+    """Refine Q for a cemented doublet until P and t are self-consistent.
 
-    e1, e2 = rx.elements[0], rx.elements[1]
-    t1, t2 = e1.t_center, e2.t_center
-
-    def eval_fn(Q):
-        return _P_from_Q_cemented(Q, cand.phi1, cand.n1, cand.n2, t1, t2, inp.fprime)
-
-    Q_new = _newton_1d(eval_fn, Q_old, inp.P0)
-
-    if Q_new is None or abs(Q_new - Q_old) < 1e-12:
-        return rx
-
+    Each iteration: check P → one Newton step on Q → thicken (updates t + EFL).
+    """
     from .cemented import radii_from_Q
-
-    try:
-        R1, R2, R3 = radii_from_Q(inp, cand.n1, cand.n2, cand.phi1, Q_new)
-    except (ValueError, ZeroDivisionError):
-        return rx
-
-    cand_refined = dataclasses.replace(cand, Q=Q_new, radii=[R1, R2, R3])
-
     from .thickening import thicken_cemented
 
-    rx_new = thicken_cemented(cand_refined, inp)
-    return rx_new if rx_new is not None else rx
+    Q = cand.Q
+    if Q is None:
+        return rx
+
+    rx_cur = rx
+
+    for _ in range(_REFINE_MAX_ITER):
+        # Evaluate P with current geometry (R, t from rx_cur)
+        e1, e2 = rx_cur.elements[0], rx_cur.elements[1]
+        P = _P_from_Q_cemented(
+            Q, cand.phi1, cand.n1, cand.n2,
+            e1.t_center, e2.t_center, inp.fprime,
+        )
+        if P is None:
+            return rx_cur
+
+        residual = P - inp.P0
+        if abs(residual) < _REFINE_TOL:
+            return rx_cur  # P = P0 with self-consistent t — done
+
+        # One Newton step: Q -= residual / (dP/dQ)
+        P_plus = _P_from_Q_cemented(
+            Q + _NEWTON_DQ, cand.phi1, cand.n1, cand.n2,
+            e1.t_center, e2.t_center, inp.fprime,
+        )
+        if P_plus is None:
+            return rx_cur
+
+        dPdQ = (P_plus - P) / _NEWTON_DQ
+        if abs(dPdQ) < 1e-15:
+            return rx_cur
+
+        step = residual / dPdQ
+        max_step = _MAX_STEP_FACTOR * max(abs(Q), 1.0)
+        if abs(step) > max_step:
+            step = math.copysign(max_step, step)
+
+        Q -= step
+
+        # Thicken with updated Q (assigns new t, scales R for EFL)
+        try:
+            R1, R2, R3 = radii_from_Q(inp, cand.n1, cand.n2, cand.phi1, Q)
+        except (ValueError, ZeroDivisionError):
+            return rx_cur
+
+        rx_new = thicken_cemented(
+            dataclasses.replace(cand, Q=Q, radii=[R1, R2, R3]), inp,
+        )
+        if rx_new is None:
+            return rx_cur
+
+        rx_cur = rx_new
+
+    return rx_cur
 
 
 # ---------------------------------------------------------------------------
@@ -339,13 +330,16 @@ def _refine_spaced(
     cand: Candidate,
     inp: Inputs,
 ) -> ThickPrescription:
-    """Refine Q1 along the coma-zero line for a spaced doublet."""
-    Q1_old = cand.Q1
-    Q2_old = cand.Q2
-    if Q1_old is None or Q2_old is None:
-        return rx
+    """Refine Q1 along the coma-zero line until P and t are self-consistent.
 
-    from .spaced import _coeffs
+    Each iteration: check P → one Newton step on Q1 → thicken (updates t + EFL).
+    """
+    from .spaced import _coeffs, radii_from_Q_pair
+    from .thickening import thicken_spaced
+
+    Q1 = cand.Q1
+    if Q1 is None or cand.Q2 is None:
+        return rx
 
     c = _coeffs(cand.n1, cand.n2, cand.phi1, cand.phi2)
     K1, K2, L = c["K1"], c["K2"], c["L"]
@@ -355,40 +349,63 @@ def _refine_spaced(
     a = -K1 / K2
     b = (inp.W0 - L) / K2
 
-    e1, e2 = rx.elements[0], rx.elements[1]
-    t1, t2 = e1.t_center, e2.t_center
-    air_gap = rx.air_gap if rx.air_gap is not None else inp.air_gap
+    rx_cur = rx
 
-    def eval_fn(Q1):
-        return _P_from_Q1_spaced(
+    for _ in range(_REFINE_MAX_ITER):
+        # Evaluate P with current geometry
+        e1, e2 = rx_cur.elements[0], rx_cur.elements[1]
+        t1, t2 = e1.t_center, e2.t_center
+        air_gap = rx_cur.air_gap if rx_cur.air_gap is not None else inp.air_gap
+
+        P = _P_from_Q1_spaced(
             Q1, a, b, cand.phi1, cand.phi2, cand.n1, cand.n2,
             t1, t2, air_gap, inp.fprime,
         )
+        if P is None:
+            return rx_cur
 
-    Q1_new = _newton_1d(eval_fn, Q1_old, inp.P0)
+        residual = P - inp.P0
+        if abs(residual) < _REFINE_TOL:
+            return rx_cur  # converged
 
-    if Q1_new is None or abs(Q1_new - Q1_old) < 1e-12:
-        return rx
-
-    Q2_new = a * Q1_new + b
-
-    from .spaced import radii_from_Q_pair
-
-    try:
-        R1, R2, R3, R4 = radii_from_Q_pair(
-            inp, cand.n1, cand.n2, cand.phi1, cand.phi2, Q1_new, Q2_new,
+        # One Newton step
+        P_plus = _P_from_Q1_spaced(
+            Q1 + _NEWTON_DQ, a, b, cand.phi1, cand.phi2, cand.n1, cand.n2,
+            t1, t2, air_gap, inp.fprime,
         )
-    except (ValueError, ZeroDivisionError):
-        return rx
+        if P_plus is None:
+            return rx_cur
 
-    cand_refined = dataclasses.replace(
-        cand, Q1=Q1_new, Q2=Q2_new, radii=[R1, R2, R3, R4],
-    )
+        dPdQ1 = (P_plus - P) / _NEWTON_DQ
+        if abs(dPdQ1) < 1e-15:
+            return rx_cur
 
-    from .thickening import thicken_spaced
+        step = residual / dPdQ1
+        max_step = _MAX_STEP_FACTOR * max(abs(Q1), 1.0)
+        if abs(step) > max_step:
+            step = math.copysign(max_step, step)
 
-    rx_new = thicken_spaced(cand_refined, inp)
-    return rx_new if rx_new is not None else rx
+        Q1 -= step
+        Q2 = a * Q1 + b
+
+        # Thicken with updated Q pair
+        try:
+            R1, R2, R3, R4 = radii_from_Q_pair(
+                inp, cand.n1, cand.n2, cand.phi1, cand.phi2, Q1, Q2,
+            )
+        except (ValueError, ZeroDivisionError):
+            return rx_cur
+
+        rx_new = thicken_spaced(
+            dataclasses.replace(cand, Q1=Q1, Q2=Q2, radii=[R1, R2, R3, R4]),
+            inp,
+        )
+        if rx_new is None:
+            return rx_cur
+
+        rx_cur = rx_new
+
+    return rx_cur
 
 
 # ---------------------------------------------------------------------------
