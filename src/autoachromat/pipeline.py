@@ -229,11 +229,11 @@ class DesignResult:
 
 
 def _optical_fingerprint(c: Candidate) -> tuple:
-    """Group key: (n1, n2, ν1, ν2) rounded to optical tolerance.
+    """Group key: (n1, n2, ν1, ν2) with n rounded to 3 decimals, ν to 1.
 
-    Two candidates share a fingerprint when their glass properties are
-    within Δn < 0.001 and Δν < 0.5 — distinct brand names but identical
-    optical performance, so Stage B optimisation produces the same geometry.
+    Bucket grouping — not a continuous tolerance test. Candidates sharing
+    a fingerprint differ in glass properties only at the rounding scale
+    (n to 0.001, ν to 0.1) and therefore produce the same Stage B geometry.
     """
     return (round(c.n1, 3), round(c.n2, 3), round(c.nu1, 1), round(c.nu2, 1))
 

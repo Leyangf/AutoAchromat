@@ -75,8 +75,8 @@ def _solve_Q_pairs(inputs: Inputs, c: dict) -> List[Tuple[float, float]]:
 
     These are the algebraic solutions of the Seidel thin-lens equations for a
     spaced doublet.  For fast systems (f/4 – f/6) they often fall in the
-    geometrically forbidden zone (inner-surface overlap); in that case the
-    coma-line sweep (``_sweep_Q1_coma_line``) finds the nearest valid design.
+    geometrically forbidden zone (inner-surface overlap); in that case both
+    roots are rejected and no numerical sweep fallback is performed.
     """
     A1, B1, A2, B2, C, K1, K2, L = (
         c["A1"],

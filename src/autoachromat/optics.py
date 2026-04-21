@@ -26,7 +26,7 @@ def refractive_index(glass: Glass, wavelength_um: float) -> float:
     """
     Compute refractive index n(λ) using the glass dispersion formula.
 
-    Supports AGF formula_id:
+    Explicitly implemented AGF formula_id:
     - 1: Schott formula
     - 2: Sellmeier 1
     - 3: Herzberger
@@ -35,6 +35,9 @@ def refractive_index(glass: Glass, wavelength_um: float) -> float:
     - 6: Sellmeier 3
     - 7: Handbook of Optics 1
     - 8: Handbook of Optics 2
+
+    Fallback (coefficients read as Sellmeier 1 layout, warning logged;
+    will silently return wrong n(λ) if the catalog layout differs):
     - 9: Sellmeier 4
     - 10: Extended 1
     - 11: Sellmeier 5
