@@ -9,13 +9,16 @@ The refractive index $n(\lambda)$ of an optical glass varies with wavelength acc
 
 $$n^2(\lambda) = 1 + \sum_{i} \frac{K_i \lambda^2}{\lambda^2 - L_i}$$
 
-The AGF catalogs used in this study include several other dispersion representations — among them the Schott polynomial, Herzberger, Conrady, and Handbook of Optics forms. The implementation explicitly evaluates the formula classes encountered in the present catalog set; fallback handling for less common AGF formula identifiers is documented in Appendix A.
+Other common dispersion representations (Schott polynomial, Herzberger, Conrady, etc.) are functionally equivalent for the present purposes; the specific catalog formats and formula handling are documented in §3.2.1 and Appendix A.
 
 The Abbe number quantifies the dispersion strength:
 
 $$\nu = \frac{n(\lambda_0) - 1}{n(\lambda_1) - n(\lambda_2)}$$
 
 where $\lambda_0$ is the primary design wavelength and $\lambda_1$, $\lambda_2$ are the short and long wavelengths, respectively. High $\nu$ indicates low dispersion (crown glasses, typically $\nu > 50$); low $\nu$ indicates high dispersion (flint glasses, typically $\nu < 35$).
+
+![[Abbe_diagram.png]]
+*Figure: Abbe diagram of 544 Sellmeier-described glasses from the CDGM, Ohara, and Schott catalogs. Crown (high $\nu$, left) and flint (low $\nu$, right) regions are clearly separated. The full catalogs include additional dispersion representations accepted by the pipeline (§3.2.1).*
 
 For a thin doublet with normalized element powers $\varphi_1$ and $\varphi_2$ (satisfying $\varphi_1 + \varphi_2 = 1$), the achromatic condition requires the chromatic power contributions to cancel:
 
@@ -25,7 +28,7 @@ This uniquely determines the power split:
 
 $$\varphi_1 = \frac{\nu_1}{\nu_1 - \nu_2}, \qquad \varphi_2 = \frac{-\nu_2}{\nu_1 - \nu_2}$$
 
-A large difference $|\nu_1 - \nu_2|$ yields milder element powers, reducing higher-order aberrations; in practice a minimum Abbe number difference is imposed to discard pairs whose element powers become unmanageably large. AutoAchromat uses $\Delta\nu_{\min} = 10$ as the default threshold, exposed as a user-configurable screening parameter rather than a theoretical hard limit. This two-wavelength achromatic condition generalizes to higher-order color correction by imposing additional constraints on partial dispersions: apochromatic (3 wavelengths) and superachromatic (4+ wavelengths) designs require matching partial dispersions across the glass pair, as illustrated by Mikš and Novák [8].
+A large difference $|\nu_1 - \nu_2|$ yields milder element powers, reducing higher-order aberrations; in practice a minimum Abbe number difference is imposed to discard pairs whose element powers become unmanageably large (the specific threshold used in the pipeline is documented in §3.2.1). This two-wavelength achromatic condition generalizes to higher-order color correction by imposing additional constraints on partial dispersions: apochromatic (3 wavelengths) and superachromatic (4+ wavelengths) designs require matching partial dispersions across the glass pair, as illustrated by Mikš and Novák [8].
 
 ### 2.2 Ray Tracing Fundamentals
 
@@ -129,7 +132,6 @@ $$P_{\text{sys}} = \sum_{k=1}^{K} P_k, \qquad W_{\text{sys}} = \sum_{k=1}^{K} W_
 Each $P_k$ and $W_k$ depends only on the ray slopes and refractive indices at surface $k$.
 
 
-
 ## Chapter 3 — Automated Achromatic Doublet Design
 
 This chapter presents AutoAchromat, an automated pipeline that takes a doublet specification (focal length, aperture, wavelength band) and produces a ranked set of manufacturable thick-lens prescriptions. The pipeline proceeds in two stages: an analytical synthesis (Stage A) that enumerates glass pairs from industrial catalogs and solves the Seidel equations derived in Chapter 2, followed by a constrained numerical optimization (Stage B) that refines the thick-lens model. Thermal stability analysis is integrated throughout. The chapter concludes with a characterization of the inherent design space degeneracy of thin-lens synthesis — a finding that motivates the coma-line sampling strategy discussed as future work in §5.4.
@@ -140,14 +142,14 @@ The pipeline implements a two-stage design process:
 
 **Stage A — Analytical Synthesis and Evaluation:**
 1. Load glass catalogs (any AGF-format catalog from the Zemax glass database can be imported).
-2. Filter glasses by wavelength range, refractive index bounds, and exclusion flags.
+2. Filter glasses by wavelength-range coverage, dispersion-formula validity, and catalog exclusion flags; entries whose computed $n(\lambda_0)$ falls outside the physically plausible range $1.3 < n < 2.6$ are rejected as corrupted.
 3. Enumerate all glass pairs satisfying $|\nu_1 - \nu_2| \geq \Delta\nu_{\min}$.
 4. For each pair, compute the achromatic power split and solve the Seidel equations.
 5. Filter solutions by geometric feasibility (minimum radius, non-overlap for spaced doublets) and by the preliminary evaluation (PE) threshold. Cemented candidates are then Top-$N$ ranked using $|W - W_0|$ as the primary metric and PE as the secondary metric. Air-spaced candidates are not Top-$N$ culled at this stage; all surviving algebraic solutions are sorted by PE, and the subsequent thickening/evaluation stages may process only the first $N$.
-6. Convert thin-lens solutions to thick-lens prescriptions with iterative EFL correction.
-7. Apply a thickness-aware Seidel refinement (§3.3.5) so that the aberration balance reflects the actual surface ray heights, not the thin-lens $h \equiv 1$ assumption.
-8. Build ray-trace models and evaluate via spot diagram analysis and Seidel coefficient extraction.
-9. Compute the first-order thermal metrics ($V_1$, $V_2$, $d\Phi/dT$, $\alpha_{h,\text{required}}$) for each retained candidate.
+6. Compute the first-order thermal metrics ($V_1$, $V_2$, $d\Phi/dT$, $\alpha_{h,\text{required}}$) for each retained candidate, so that thermal information accompanies the candidate through all subsequent stages.
+7. Convert thin-lens solutions to thick-lens prescriptions with iterative EFL correction.
+8. Apply a thickness-aware Seidel refinement (§3.3.5) so that the aberration balance reflects the actual surface ray heights, not the thin-lens $h \equiv 1$ assumption.
+9. Build ray-trace models and evaluate via spot diagram analysis and Seidel coefficient extraction.
 
 **Stage B — Thick-Lens Optimisation:**
 1. Deduplicate user-selected Stage A candidates by the rounded optical fingerprint defined in §3.4.1; one representative per fingerprint group is optimized.
@@ -162,11 +164,11 @@ Alternative analytical formulations of the same thin-lens Seidel equations exist
 
 #### 3.2.1 Glass Pair Enumeration
 
-The pipeline begins by loading glass catalogs in the industry-standard AGF (ANSI Glass Format) format, supporting multiple manufacturers (e.g. SCHOTT, OHARA, CDGM). For each glass entry, the reader extracts the dispersion formula type and coefficients, transmission wavelength limits, thermo-optic (TD) coefficients and coefficients of thermal expansion (CTE) for thermal analysis, relative cost, and a status flag indicating whether the glass is preferred, standard, or obsolete.
+The pipeline begins by loading glass catalogs in the industry-standard AGF (ANSI Glass Format) format, supporting multiple manufacturers (e.g. SCHOTT, OHARA, CDGM). The AGF catalogs include several dispersion representations — among them the Sellmeier, Schott polynomial, Herzberger, Conrady, and Handbook of Optics forms; the implementation explicitly evaluates the formula classes encountered in the present catalog set (fallback handling is documented in Appendix A). For each glass entry, the reader extracts the dispersion formula type and coefficients, transmission wavelength limits, thermo-optic (TD) coefficients and coefficients of thermal expansion (CTE) for thermal analysis, relative cost, and a status flag indicating whether the glass is preferred, standard, or obsolete.
 
 Before pairing, individual glasses are filtered by the following criteria: (1) glasses flagged as excluded by the manufacturer are removed, (2) the dispersion formula must exist with valid coefficients and cover the user-specified wavelength range, and (3) the refractive index at the design wavelength must pass a sanity check ($1.3 < n < 2.6$) to guard against corrupted catalog entries.
 
-All ordered pairs of surviving glasses are then tested against the minimum Abbe number difference constraint $|\nu_1 - \nu_2| \geq \Delta\nu_{\min}$. This threshold ensures that the achromatic power split produces element powers that are not excessively large. The implementation uses the general form with a chromatic correction target offset $C_0$:
+All ordered pairs of surviving glasses are then tested against the minimum Abbe number difference constraint $|\nu_1 - \nu_2| \geq \Delta\nu_{\min}$. AutoAchromat uses $\Delta\nu_{\min} = 10$ as the default, exposed as a user-configurable screening parameter rather than a theoretical hard limit. This threshold ensures that the achromatic power split produces element powers that are not excessively large. The implementation uses the general form with a chromatic correction target offset $C_0$:
 
 $$\varphi_1 = \frac{\nu_1(1 - \nu_2 C_0)}{\nu_1 - \nu_2}, \qquad \varphi_2 = 1 - \varphi_1$$
 
@@ -445,7 +447,7 @@ Temperature affects lens performance through two coupled mechanisms that shift t
 1. **Thermo-optic effect** ($dn/dT$): the refractive index of each glass changes with temperature, altering the optical power of every surface.
 2. **Mechanical expansion** (CTE $\alpha$): the glass elements expand, changing surface radii and element thicknesses; simultaneously, the housing expands, shifting the image plane position.
 
-A design that is insensitive to uniform temperature changes — **passive athermalization** — requires these effects to cancel at the system level. The simultaneous treatment of achromatism and athermalism as a unified design problem has been addressed by several authors. Ryu and Park [9] unify both conditions into a single geometric point — the "aberration-corrected point" $L_c(\omega_c, \gamma_c)$ — on a chromatic power ($\omega$) vs. thermal power ($\gamma$) glass map, and rank candidate glasses by a Material Selection Index Including Price (MSIP) that balances optical proximity and cost. Ivanov and Romanova [10] show analytically that including a finite air gap $D$ between components expands the athermal solution space from a single constraint line on the $V$–$\omega$ glass map to a bounded region between two asymptotic curves, significantly increasing the number of viable glass pair candidates. The present pipeline computes thermal metrics for each retained candidate but deliberately separates them from the optical ranking: it reports $V_1$, $V_2$, the normalised system power drift $d\Phi/dT$, and the required housing CTE $\alpha_{h,\text{required}}$ alongside optical merit without filtering. These exported quantities are sufficient to compute the residual thermal defocus in post-processing once a housing CTE is chosen, using the expression derived in §3.5.2. This preserves designer flexibility over the performance–thermal–cost trade-off, whose priorities are project-specific.
+A design that is insensitive to uniform temperature changes — **passive athermalization** — requires these effects to cancel at the system level [9, 10]. The present pipeline computes thermal metrics for each retained candidate but deliberately separates them from the optical ranking: it reports $V_1$, $V_2$, the normalised system power drift $d\Phi/dT$, and the required housing CTE $\alpha_{h,\text{required}}$ alongside optical merit without filtering. These exported quantities are sufficient to compute the residual thermal defocus in post-processing once a housing CTE is chosen, using the expression derived in §3.5.2. This preserves designer flexibility over the performance–thermal–cost trade-off, whose priorities are project-specific.
 
 #### 3.5.1 Thermal Model
 
@@ -481,139 +483,10 @@ The lens is mounted in a housing that also expands with temperature (CTE $\alpha
 
 $$\alpha_{h,\text{required}} = -\frac{d\Phi}{dT}\bigg|_{\text{norm}}$$
 
-If $\alpha_{h,\text{required}}$ matches a practical housing material (e.g., aluminium at $\sim$23.6 ppm/K), the design is passively athermalized without any active compensation. Ryu and Park [9] automate this matching via the MSIP index, which scores candidate glasses by their proximity to the ideal achromatic-athermal point on a $\omega$–$\gamma$ glass map, simultaneously balancing optical performance and cost. If no match is found, the designer must either accept a thermal defocus budget or choose a different glass pair.
+If $\alpha_{h,\text{required}}$ matches a practical housing material (e.g., aluminium at $\sim$23.6 ppm/K), the design is passively athermalized without any active compensation. If no match is found, the designer must either accept a thermal defocus budget or choose a different glass pair.
 
 When the actual housing CTE $\alpha_h$ does not match $\alpha_{h,\text{required}}$, the residual focal shift over a temperature change $\Delta T$ is:
 
 $$\delta f' = f' \cdot (\alpha_{h,\text{required}} - \alpha_h) \cdot \Delta T$$
 
-This is the quantity that ultimately matters for system performance: it determines whether the thermal defocus falls within the depth of focus budget (typically $\pm 2\lambda F_\#^2$ for diffraction-limited systems). For air-spaced doublets, Ivanov and Romanova [10] show that the finite air gap introduces an additional degree of freedom that expands the set of glass pairs achieving small $\delta f'$, widening the athermal solution space from a single constraint line to a bounded region on the glass map.
-
-
-## Appendix A — AGF Dispersion Formula Handling
-
-The AGF catalog format identifies each dispersion model by an integer `formula_id`. AutoAchromat's dispersion evaluator covers the following cases:
-
-| `formula_id` | Name | Implementation status |
-|:---:|:---|:---|
-| 1 | Schott polynomial | Explicit |
-| 2 | Sellmeier 1 | Explicit |
-| 3 | Herzberger | Explicit |
-| 4 | Sellmeier 2 | Explicit |
-| 5 | Conrady | Explicit |
-| 6 | Sellmeier 3 | Explicit |
-| 7 | Handbook of Optics 1 | Explicit |
-| 8 | Handbook of Optics 2 | Explicit |
-| 9 | Sellmeier 4 | Fallback to Sellmeier 1 layout (warning logged) |
-| 10 | Extended 1 | Fallback to Sellmeier 1 layout (warning logged) |
-| 11 | Sellmeier 5 | Fallback to Sellmeier 1 layout (warning logged) |
-| 12 | Extended 2 | Fallback to Sellmeier 1 layout (warning logged) |
-
-A filter stage rejects any glass whose `formula_id` or coefficient list is missing, whose usable wavelength range does not cover the design band $[\min(\lambda_0,\lambda_1,\lambda_2), \max(\lambda_0,\lambda_1,\lambda_2)]$, or whose computed $n(\lambda_0)$ falls outside the sanity range $1.3 < n < 2.6$.
-
-
-## Appendix B — Manufacturing Lookup Tables (Retaining-Ring Mounting)
-
-**Table B.1**: Outside diameter increment $\Delta(D)$ for retaining-ring mounting. The outside diameter is $\phi = D + \Delta(D)$.
-
-| Clear Aperture $D$ (mm) | Increment $\Delta$ (mm) |
-|:---:|:---:|
-| $\leq 6$ | — (invalid for retaining ring) |
-| $\leq 10$ | 1.0 |
-| $\leq 18$ | 1.5 |
-| $\leq 30$ | 2.0 |
-| $\leq 50$ | 2.5 |
-| $\leq 80$ | 3.0 |
-| $\leq 120$ | 3.5 |
-| $> 120$ | 4.5 |
-
-**Table B.2**: Minimum thickness requirements. The edge-thickness limit is binding for positive elements; the center-thickness limit is binding for negative elements.
-
-| Clear Aperture $D$ (mm) | $t_{e,\min}$ (positive lens) | $t_{c,\min}$ (negative lens) |
-|:---:|:---:|:---:|
-| $\leq 6$ | 0.4 | 0.6 |
-| $\leq 10$ | 0.6 | 0.8 |
-| $\leq 18$ | 0.8 | 1.0 |
-| $\leq 30$ | 1.2 | 1.5 |
-| $\leq 50$ | 1.8 | 2.2 |
-| $\leq 80$ | 2.4 | 3.5 |
-| $\leq 120$ | 3.0 | 5.0 |
-| $> 120$ | 4.0 | 8.0 |
-
-In addition to the tabulated limits, an absolute minimum center thickness of 0.5 mm is always enforced.
-
-
-## Appendix C — Numerical Implementation Details
-
-**Deduplication fingerprint.** Stage A candidates are grouped for Stage B by the tuple $(\text{round}(n_1,3), \text{round}(n_2,3), \text{round}(\nu_1,1), \text{round}(\nu_2,1))$.
-
-**Optimizer variable bounds.** Radii are bounded sign-preservingly; for each starting radius $R_0$ the magnitude satisfies $D/2 + 1\text{ mm} \leq |R| \leq \max(10 f',\;5|R_0|)$. Element thicknesses have lower bounds including sag correction so that the Appendix B edge-thickness limit remains feasible; per-element maximum thicknesses are either user-supplied or automatically set to $\max(5\,t_{\min},\;20\text{ mm})$. The air-gap variable (spaced doublets only) uses either user-supplied bounds or an automatic default.
-
-**Custom edge-thickness operand.** AutoAchromat uses a custom operand, `_edge_thickness_fixed_a`, rather than optiland's built-in `edge_thickness`, because the built-in operand reads `surface.semi_aperture`, which can be unset after paraxial image solving. The custom operand accepts the semi-aperture $a = D/2$ explicitly and evaluates the signed sag difference at that height.
-
-**Default Stage B operand weights.** EFL: 10, on-axis RMS spot: 4, off-axis RMS spot: 1, edge-thickness inequality: 5.
-
-**Revert threshold.** On-axis RMS worse than $1.10 \times$ the Stage A value triggers restoration of Stage A variable values.
-
-**Seidel refinement constants.** Tolerance $|P - P_0| < 10^{-6}$; maximum 10 iterations; finite-difference step $10^{-7}$ on $Q$ (or $Q_1$); damped Newton step clamped to $|\Delta Q| \leq 0.5\,\max(|Q|,1)$.
-
-**EFL correction constants.** Convergence tolerance $|k - 1| < 10^{-9}$ on the uniform radius-scaling factor $k = f'_{\text{target}} / f'_{\text{actual}}$; correction is abandoned if $k \leq 0$ or $k > 5$ or the EFL is non-finite; a maximum of 4 correction rounds is applied.
-
-**Thermal model scope.** The thermal analysis implements the element-power thin-lens model of §3.5.1. Each $V_i$ is computed per glass element under the air–glass–air assumption, and the system drift is assembled as $V_1\varphi_1 + V_2\varphi_2$. No independent cemented-interface thermo-mechanical model is included; differential CTE stress and adhesive-layer deformation are not modelled.
-
-
-## Appendix D — Surface-Resolved Thermal Decomposition for Cemented Doublets
-
-The element-power model of §3.5.1 forms the normalized system drift $V_1\varphi_1 + V_2\varphi_2$ from two per-element thermo-optical coefficients. Because each $V_i$ treats its element as an air–glass–air thin lens, the thermal expansion of the shared cemented curvature $R_2$ is implicitly attributed to glass 1 inside $\varphi_1$ and to glass 2 inside $\varphi_2$. When $\alpha_1 \neq \alpha_2$, the same physical surface therefore carries two distinct expansion rates in the bookkeeping. This appendix derives a single-surface-consistent decomposition that makes this asymmetry explicit.
-
-### D.1 Three-Surface Thin-Lens Power
-
-For a thin cemented doublet ($d = 0$) with surface curvatures $c_i = 1/R_i$, the total paraxial power is the sum of three refracting-surface contributions:
-
-$$\Phi = (n_1 - 1)c_1 + (n_2 - n_1)c_2 + (1 - n_2)c_3.$$
-
-This is algebraically equal to
-
-$$(n_1-1)(c_1-c_2) + (n_2-1)(c_2-c_3) = \varphi_1 + \varphi_2,$$
-
-but keeps the three physical refractions separate.
-
-### D.2 Thermal Derivative
-
-Differentiating at constant surface topology and applying the first-order curvature-expansion law $dc/dT = -\alpha c$ gives
-
-$$\begin{aligned}
-C_1 &= \frac{dn_1}{dT}\,c_1 - (n_1-1)\alpha_1 c_1, \\[2pt]
-C_2 &= \left(\frac{dn_2}{dT} - \frac{dn_1}{dT}\right)c_2 - (n_2-n_1)\alpha_{12} c_2, \\[2pt]
-C_3 &= -\frac{dn_2}{dT}\,c_3 - (1-n_2)\alpha_2 c_3,
-\end{aligned}$$
-
-and
-
-$$\frac{d\Phi}{dT} = C_1 + C_2 + C_3.$$
-
-Here $\alpha_1$ and $\alpha_2$ are the two glass CTEs applied to the outer surfaces that bound only their own glass, while $\alpha_{12}$ is the effective CTE governing the shared cemented curvature.
-
-### D.3 Interface-Curvature Expansion Models
-
-The coefficient $\alpha_{12}$ is not an optical glass property; it depends on how the bonded pair deforms. Three simple closed-form assumptions are possible:
-
-| Model | $\alpha_{12}$ | Interpretation |
-|:---|:---:|:---|
-| `glass1` | $\alpha_1$ | $R_2$ tracks the front element. |
-| `glass2` | $\alpha_2$ | $R_2$ tracks the rear element. |
-| `mean` | $(\alpha_1 + \alpha_2)/2$ | Equal-weight illustrative compromise. |
-
-A stiffness-weighted choice would require elastic constants and adhesive-layer data and is outside the scope of this thesis.
-
-### D.4 Comparison with the Element-Power Model
-
-Writing the element-power expression in the same $(c_i,\alpha_i,dn_i/dT)$ variables and subtracting gives
-
-$$\left.\frac{d\Phi}{dT}\right|_{\mathrm{surf}} \;-\; \left.\frac{d\Phi}{dT}\right|_{\mathrm{elem}} \;=\; \Big[\alpha_2(n_2-1) - \alpha_1(n_1-1) - \alpha_{12}(n_2-n_1)\Big]\,c_2.$$
-
-The difference is proportional to the cemented-interface curvature $c_2$ and vanishes identically when $\alpha_1 = \alpha_2 = \alpha_{12}$. Otherwise the two models generally disagree: the element-power result silently assigns two distinct expansions to the same physical $R_2$, whereas the surface-resolved decomposition requires one explicit $\alpha_{12}$ assumption. In this limited bookkeeping sense, the surface-resolved form is internally more consistent because it assigns a single expansion law to the shared physical curvature. This comes at the cost of introducing the additional thermo-mechanical assumption $\alpha_{12}$.
-
-### D.5 Scope and Status
-
-This decomposition is a theoretical diagnostic framework for the cemented-interface contribution. It is not currently implemented in the pipeline, and the thermal metric reported in §3.5 continues to use the element-power model $V_1\varphi_1 + V_2\varphi_2$. A future extension could report the three contributions $C_1$, $C_2$, and $C_3$ alongside the existing metrics under a stated $\alpha_{12}$ assumption. Differential-CTE stress, adhesive-layer mechanics, and thermo-mechanical surface-figure deformation remain outside the scope of the first-order analysis adopted in this thesis.
+This is the quantity that ultimately matters for system performance: it determines whether the thermal defocus falls within the depth of focus budget (typically $\pm 2\lambda F_\#^2$ for diffraction-limited systems). For air-spaced doublets, the finite air gap introduces an additional degree of freedom that expands the athermal solution space [10].
