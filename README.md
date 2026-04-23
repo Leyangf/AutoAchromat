@@ -4,11 +4,11 @@ Automated achromatic doublet lens designer. Generates cemented and air-spaced do
 
 **Cemented Doublet**
 
-![Cemented doublet example](example/cemented_example.png)
+![Cemented doublet example](example/cemented_gui.png)
 
 **Air-Spaced Doublet**
 
-![Air-spaced doublet example](example/spaced_example.png)
+![Air-spaced doublet example](example/spaced_gui.png)
 
 ## What It Does
 
