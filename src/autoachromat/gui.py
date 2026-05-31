@@ -664,9 +664,11 @@ class AutoAchromatGUI(tk.Tk):
     # ===================================================================
 
     def _add_catalog(self) -> None:
+        catalog_dir = Path(__file__).resolve().parent.parent.parent / "data" / "catalogs"
         paths = filedialog.askopenfilenames(
             title="Select AGF Catalog File(s)",
             filetypes=[("AGF Files", "*.agf *.AGF"), ("All Files", "*.*")],
+            initialdir=str(catalog_dir) if catalog_dir.is_dir() else None,
         )
         for p in paths:
             if p and p not in self._catalog_paths:
