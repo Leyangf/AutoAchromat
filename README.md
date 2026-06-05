@@ -1,12 +1,10 @@
 # AutoAchromat
 
-Automated achromatic doublet lens designer. Generates cemented and air-spaced doublet initial structures from glass catalogs, evaluates optical performance via ray tracing, and exports designs for further optimization in Zemax or other optical design software.
+Automated achromatic doublet lens designer. Generates initial cemented or air-spaced doublet structures from glass catalogs, evaluates their optical performance by ray tracing alongside manufacturing-feasibility and thermal checks, and exports designs for further optimization in optical design software.
 
-**Cemented Doublet**
+![Achromatic doublet](example/doublet.png)
 
-![Cemented doublet example](example/cemented_gui.png)
-
-**Air-Spaced Doublet**
+**Doublet Designer GUI (reference)**
 
 ![Air-spaced doublet example](example/spaced_gui.png)
 
@@ -14,11 +12,19 @@ Automated achromatic doublet lens designer. Generates cemented and air-spaced do
 
 1. Reads industry-standard AGF glass catalogs (SCHOTT, OHARA, CDGM, etc.)
 2. Automatically searches all valid glass pair combinations
-3. Supports user-defined aberration targets (spherical aberration, coma, chromatic) via Advanced settings
+3. Supports user-defined aberration targets (spherical aberration, coma, chromatic aberration) via Advanced settings
 4. Produces thick-lens prescriptions with manufacturing-feasible thicknesses
 5. Evaluates each design: spot size, Seidel aberrations, chromatic errors, secondary spectrum, thermal stability
 6. Optionally refines designs via built-in numerical optimizer (optiland, experimental)
 7. Exports the best candidates as `.zmx` (Zemax), JSON, or CSV
+
+## How It Works
+
+A two-stage pipeline: **Stage A** synthesizes and screens doublet candidates
+from thin-lens Seidel theory, then ray-traces them; **Stage B** (optional)
+refines the best designs with a least-squares optimizer.
+
+![Pipeline overview](example/pipeline.png)
 
 ## Installation
 
@@ -83,12 +89,54 @@ Select one or more rows in the results table and click **Optimize**. This runs a
 - **Export .zmx** — export selected design to Zemax for further optimization
 - **Export JSON / CSV** — export full results table
 
+## Command-Line (Batch) Use
+
+In addition to the GUI, the project installs an `autoachromat` command for headless / scriptable runs. It reads a JSON config, runs the full Stage A pipeline (thin-lens synthesis → thickening → ray tracing), prints a ranked results table, and can export the results to JSON.
+
+```bash
+uv run autoachromat --config config.json
+uv run autoachromat --config config.json --out results.json   # also write JSON
+uv run autoachromat --config config.json --thin-only          # synthesis only, skip ray tracing
+uv run autoachromat --config config.json --max-n 20           # cap candidates evaluated
+```
+
+Minimal `config.json` (wavelengths in nm; `catalogs` paths are resolved relative to the config file):
+
+```json
+{
+  "system_type": "spaced",
+  "fprime": 100.0,
+  "D": 25.0,
+  "lam1": 486.13,
+  "lam0": 587.56,
+  "lam2": 656.27,
+  "C0": 0.0,
+  "P0": 0.0,
+  "W0": 0.0,
+  "min_delta_nu": 10.0,
+  "max_PE": 0.01,
+  "air_gap": 1.0,
+  "N": 50,
+  "catalogs": ["data/catalogs/SCHOTT.AGF"]
+}
+```
+
+> **Note:** The CLI covers Stage A only. Stage B (numerical optimization) is available exclusively in the GUI.
+
 ## Glass Catalogs
 
-The repo includes Schott, OHARA and CDGM catalogs in `data/catalogs/`. To add other glasses, copy e.g.`SCHOTT.AGF` from your Zemax installation to `data/catalogs/`.
+The repo includes Schott, OHARA, and CDGM catalogs in `data/catalogs/`. To add other vendors, copy the corresponding `.AGF` file (e.g. `HOYA.AGF`) from your Zemax installation into `data/catalogs/`.
 
 ## Running Tests
 
 ```bash
 uv run pytest
 ```
+
+## Acknowledgements
+
+This work was inspired by:
+
+> D. H. Nguyen and A. V. Bakholdin, "Calculation automation of 'cemented doublet
+> with a singlet' and 'singlet with a cemented doublet' objectives," *Journal of
+> Optical Technology* **90**(1), 6–13 (2023). https://doi.org/10.1364/JOT.90.000006
